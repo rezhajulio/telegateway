@@ -1,0 +1,18 @@
+# Copy to config.toml and fill in your bots. Never commit the real file.
+listen = "127.0.0.1:8080"
+
+[[bots]]
+# Public route: POST /webhooks/mediadownloadbot
+id = "mediadownloadbot"
+# Internal bot endpoint that receives the forwarded update.
+downstream_url = "http://127.0.0.1:8081/webhook"
+# Must match the secret passed to Telegram's setWebhook.
+webhook_secret = "change-me-to-a-long-random-value"
+# Token-bucket quota per chat, refilled every minute.
+rate_limit_per_minute = 30
+
+# [[bots]]
+# id = "second-bot"
+# downstream_url = "http://127.0.0.1:8082/webhook"
+# webhook_secret = "another-long-random-value"
+# rate_limit_per_minute = 60
