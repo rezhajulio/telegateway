@@ -37,12 +37,23 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .parse()
         .context("invalid `listen` address in config")?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(
-        %addr,
-        bots = cfg.bots.len(),
-        "telegateway listening"
-    );
-    axum::serve(listener, router).await?;
+
+    match &cfg.tls {
+        Some(tls) => {
+            let rustls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                    .await
+                    .context("failed to load TLS certificate/key")?;
+            tracing::info!(%addr, bots = cfg.bots.len(), "telegateway listening (https)");
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        None => {
+            tracing::info!(%addr, bots = cfg.bots.len(), "telegateway listening (http)");
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, router).await?;
+        }
+    }
     Ok(())
 }

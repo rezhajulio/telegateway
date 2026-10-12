@@ -86,6 +86,21 @@ rate_limit_per_minute = 30
 
 Set `RUST_LOG` to control log verbosity, e.g. `RUST_LOG=telegateway=debug`.
 
+### TLS
+
+If no reverse proxy sits in front, telegateway can terminate TLS itself:
+
+```toml
+[tls]
+cert_path = "/etc/telegateway/fullchain.pem"
+key_path = "/etc/telegateway/privkey.pem"
+```
+
+With `[tls]` present, `listen` serves HTTPS instead of plain HTTP. Without
+it, the gateway speaks plain HTTP and expects TLS to be terminated upstream.
+Certificate issuance and renewal stay your job (certbot, Caddy, your CA);
+restart the process to pick up renewed certificates.
+
 ## Install from source
 
 You need the [Rust toolchain](https://rustup.rs) (1.85+):

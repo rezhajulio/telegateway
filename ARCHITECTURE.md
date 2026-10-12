@@ -27,7 +27,9 @@ Non-goals:
 - Generic API management (OAuth, billing, plugin marketplaces).
 - Exactly-once delivery — not realistic across HTTP boundaries; the gateway
   is at-least-once with Telegram-side retries.
-- Replacing the TLS edge (Caddy, etc.); the gateway sits behind it.
+- Certificate issuance and renewal. The gateway can terminate TLS with
+  certificates you provide, but getting and renewing them stays your job
+  (certbot, Caddy, your internal CA).
 
 ## 3. System context
 
@@ -158,9 +160,10 @@ in logs or error responses.
 ## 11. Deployment
 
 Single static binary. Recommended topology: TLS edge → telegateway →
-bots, all on one private container network. The gateway is stateless today
-(rate-limiter state is in-memory and safe to lose), so it can be replicated
-behind the edge once needed.
+bots, all on one private container network. Without an edge, the gateway
+terminates TLS itself from the `[tls]` config section. The gateway is
+stateless today (rate-limiter state is in-memory and safe to lose), so it
+can be replicated behind the edge once needed.
 
 ## 12. Roadmap
 

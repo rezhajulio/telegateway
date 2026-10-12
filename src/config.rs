@@ -16,6 +16,10 @@ pub struct Config {
     /// The bots served by this gateway.
     #[serde(default)]
     pub bots: Vec<BotConfig>,
+    /// TLS termination settings. When present, the gateway serves HTTPS
+    /// on `listen` instead of plain HTTP.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
 }
 
 /// Configuration for a single downstream bot.
@@ -38,6 +42,16 @@ fn default_listen() -> String {
 
 fn default_rate_limit() -> u32 {
     30
+}
+
+/// TLS termination with certificates you provide. For setups with a reverse
+/// proxy in front, leave this out and terminate TLS there instead.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the PEM-encoded certificate chain.
+    pub cert_path: String,
+    /// Path to the PEM-encoded private key.
+    pub key_path: String,
 }
 
 #[derive(Debug, Error)]
@@ -106,6 +120,25 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+
+    if let Some(tls) = &config.tls {
+        for (name, path) in [
+            ("tls.cert_path", tls.cert_path.as_str()),
+            ("tls.key_path", tls.key_path.as_str()),
+        ] {
+            if path.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "`{name}` must not be empty"
+                )));
+            }
+            if !Path::new(path).is_file() {
+                return Err(ConfigError::Validation(format!(
+                    "`{name}`: file not found: {path}"
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -157,5 +190,37 @@ webhook_secret = "other"
         let text = valid_toml().replace("http://127.0.0.1:8081/webhook", "://not-a-url");
         let config: Config = toml::from_str(&text).unwrap();
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_tls_with_missing_files() {
+        let text = valid_toml().to_owned()
+            + r#"
+[tls]
+cert_path = "/nonexistent/cert.pem"
+key_path = "/nonexistent/key.pem"
+"#;
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(matches!(validate(&config), Err(ConfigError::Validation(_))));
+    }
+
+    #[test]
+    fn accepts_tls_section_when_files_exist() {
+        let dir = std::env::temp_dir();
+        let cert = dir.join("telegateway-test-cert.pem");
+        let key = dir.join("telegateway-test-key.pem");
+        std::fs::write(&cert, "pem").unwrap();
+        std::fs::write(&key, "pem").unwrap();
+        let text = format!(
+            "{}\n[tls]\ncert_path = \"{}\"\nkey_path = \"{}\"\n",
+            valid_toml(),
+            cert.display(),
+            key.display()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
+        assert!(config.tls.is_some());
+        std::fs::remove_file(&cert).ok();
+        std::fs::remove_file(&key).ok();
     }
 }

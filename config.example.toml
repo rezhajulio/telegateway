@@ -1,6 +1,12 @@
 # Copy to config.toml and fill in your bots. Never commit the real file.
 listen = "127.0.0.1:8080"
 
+# Optional: terminate TLS in the gateway itself when no reverse proxy
+# sits in front. With [tls] present, `listen` serves HTTPS.
+# [tls]
+# cert_path = "/etc/telegateway/fullchain.pem"
+# key_path = "/etc/telegateway/privkey.pem"
+
 [[bots]]
 # Public route: POST /webhooks/mediadownloadbot
 id = "mediadownloadbot"
