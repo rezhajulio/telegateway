@@ -33,22 +33,24 @@ Non-goals:
 
 ## 3. System context
 
-```
-                          public internet
-                                 │
-                    ┌────────────┴────────────┐
-                    │  TLS edge (e.g. Caddy)  │  TLS, coarse limits
-                    └────────────┬────────────┘
-                                 │  POST /webhooks/:bot_id
-                    ┌────────────┴────────────┐
-                    │       telegateway       │  acceptance boundary
-                    └────────────┬────────────┘
-                                 │  private network only
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-     ┌────────┴────────┐ ┌───────┴────────┐ ┌──────┴───────┐
-     │   bot: media    │ │  bot: pythonid │ │  bot: notes  │  private consumers
-     └─────────────────┘ └────────────────┘ └──────────────┘
+```mermaid
+flowchart TB
+    subgraph public["Public"]
+        internet("Public internet")
+        edge["TLS edge (e.g. Caddy)<br/>TLS, coarse limits"]
+    end
+    subgraph private["Private network"]
+        gateway["telegateway<br/>acceptance boundary"]
+        bot_media["bot: media"]
+        bot_pythonid["bot: pythonid"]
+        bot_notes["bot: notes"]
+    end
+
+    internet -->|"POST /webhooks/:bot_id"| edge
+    edge --> gateway
+    gateway --> bot_media
+    gateway --> bot_pythonid
+    gateway --> bot_notes
 ```
 
 Trust boundaries:
