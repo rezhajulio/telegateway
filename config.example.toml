@@ -1,8 +1,9 @@
 # Copy to config.toml and fill in your bots. Never commit the real file.
 listen = "127.0.0.1:8080"
 
-# Durable outbox: accepted updates are stored in SQLite and delivered
-# asynchronously with retries.
+# Durable outbox: always on. Accepted updates are stored in SQLite and
+# delivered asynchronously with retries. These are the defaults;
+# uncomment to change them.
 # [outbox]
 # path = "outbox.db"
 # max_attempts = 25
