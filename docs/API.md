@@ -2,7 +2,8 @@
 
 How to talk to the gateway: webhook ingress, probes, and the admin API.
 Base URL is wherever the gateway listens (default `http://127.0.0.1:8080`),
-or `https://` when `[tls]` is configured.
+or `https://` when `[tls]` is configured. When `[admin] listen` is set,
+admin routes are served on that address instead of the main listener.
 
 ## Webhook ingress
 
@@ -20,14 +21,25 @@ curl -X POST localhost:8080/webhooks/echo-python \
 | ------ | ------- |
 | `200`  | Accepted into the outbox (or duplicate / rate-limited). |
 | `400`  | Malformed update (missing `update_id`). |
-| `401`  | Wrong or missing webhook secret. |
+| `401`  | Wrong or missing webhook secret (verified before body parse). |
 | `404`  | Unknown bot id. |
-| `503`  | Outbox unavailable; Telegram retries. |
+| `503`  | Outbox unavailable, bot queue cap (`max_pending`) reached, or concurrency shed; Telegram retries. |
+
+Ingress validates the bot and secret before parsing the request body. The stored
+and forwarded payload is the original bytes Telegram sent (no re-serialization).
+Rate limiting keys on chat or, when absent, the sending user; duplicate updates
+are checked before the limiter consumes quota, and the limiter's memory is pruned
+hourly.
 
 Accepted updates are delivered to the downstream bot asynchronously with
 retries. The `200` means "durable", not "delivered". Forwarded requests
-carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery
-is at-least-once: downstream bots dedupe on `update_id`.
+carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery ordering
+is at-least-once, per-bot sequential, best-effort order (retries reorder):
+downstream bots must deduplicate on `update_id`. Outbound requests do not follow
+redirects, enforce a 5s connect timeout, and report 504 on timeout.
+Downstream 4xx responses (except 408/425/429) dead-letter immediately and do not
+trip the circuit breaker. `Retry-After` headers on 429/503 are honored. Delivery
+errors never leak downstream or Telegram URLs.
 
 ## Probes
 
@@ -38,12 +50,15 @@ curl localhost:8080/readyz   # readiness: also checks the outbox database
 
 ## Admin API
 
-Guarded by the `[admin]` token as a bearer token. The routes are not
-registered at all when `[admin]` is absent.
+Guarded by the `[admin]` token as a bearer token (must be at least 32 characters).
+The routes are not registered at all when `[admin]` is absent. If `[admin] listen`
+is specified, these routes are served exclusively on that socket address and are
+absent from the public listener.
 
 ```toml
 [admin]
-token = "a-long-random-value"
+token = "change-me-to-a-long-random-value-at-least-32-chars"
+# listen = "127.0.0.1:9090"
 ```
 
 ### List outbox rows

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Durable outbox: accepted updates are persisted to SQLite before the
 //! gateway answers Telegram, then delivered asynchronously with retries.
-//! Delivery is at-least-once; downstream bots dedupe on `update_id`.
+//! Delivery is at-least-once, per-bot sequential, and ordering is best-effort
+//! (retries reorder). Downstream bots dedupe on `update_id`.
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod breaker;
@@ -10,7 +11,7 @@ pub mod dispatch;
 mod store;
 
 pub use breaker::{CircuitBreaker, Decision};
-pub use dispatch::{Dispatcher, deliver_payload};
+pub use dispatch::{DeliveryError, Dispatcher, deliver_payload};
 pub use store::{OUTBOX_STATUSES, OutboxEntry, OutboxRow, Store};
 
 /// Exponential backoff with jitter for a 1-based attempt number:
@@ -47,5 +48,21 @@ mod tests {
     fn backoff_caps_at_one_hour() {
         let d = backoff_delay(100).as_secs_f64();
         assert!((2880.0..=4320.0).contains(&d), "capped: {d}");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn backoff_delay_proptest(attempt: u32) {
+            let d = backoff_delay(attempt);
+            let secs = d.as_secs_f64();
+            let base_exp = 5u64
+                .saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1).min(12)))
+                .min(3600) as f64;
+            let min_expected = base_exp * 0.8;
+            let max_expected = base_exp * 1.2;
+            proptest::prop_assert!(secs >= min_expected - 1e-6, "secs {secs} < min {min_expected}");
+            proptest::prop_assert!(secs <= max_expected + 1e-6, "secs {secs} > max {max_expected}");
+            proptest::prop_assert!(secs <= 3600.0 * 1.2 + 1e-6, "exceeds 3600 * 1.2");
+        }
     }
 }

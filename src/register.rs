@@ -5,6 +5,7 @@
 //! with curl.
 use std::time::Duration;
 
+use reqwest::redirect::Policy;
 use thiserror::Error;
 
 use crate::config::{BotConfig, Config};
@@ -13,15 +14,41 @@ use crate::config::{BotConfig, Config};
 /// point it at a stub server.
 pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
+/// Build a hardened HTTP client for Telegram Bot API calls.
+pub fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("failed to build reqwest client")
+}
+
 /// Everything that can go wrong while registering a webhook.
 #[derive(Debug, Error)]
 pub enum RegisterError {
-    /// The HTTP request itself failed.
+    /// The HTTP request itself failed (URL stripped to prevent token leak).
     #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
-    /// Telegram answered, but with `ok: false`.
+    Request(reqwest::Error),
+    /// Telegram answered with HTTP status (e.g. 5xx, 429). Retryable.
+    #[error("server status: {0}")]
+    Status(reqwest::StatusCode),
+    /// Telegram answered, but with `ok: false` and client error. Not retried.
     #[error("telegram refused: {0}")]
     Refused(String),
+}
+
+impl RegisterError {
+    /// Whether this error is retryable (transient transport error, 5xx, or 429).
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            RegisterError::Request(_) => true,
+            RegisterError::Status(s) => {
+                s.is_server_error() || *s == reqwest::StatusCode::TOO_MANY_REQUESTS
+            }
+            RegisterError::Refused(_) => false,
+        }
+    }
 }
 
 /// The public webhook URL Telegram will call for this bot.
@@ -43,17 +70,26 @@ pub async fn register_bot(
 ) -> Result<(), RegisterError> {
     let token = bot.bot_token.as_deref().unwrap_or("");
     let url = format!("{}/bot{token}/setWebhook", api_base.trim_end_matches('/'));
-    let body: serde_json::Value = client
+    let resp = client
         .post(&url)
-        .timeout(Duration::from_secs(10))
         .json(&serde_json::json!({
             "url": webhook_url(public_url, &bot.id),
             "secret_token": bot.webhook_secret,
         }))
         .send()
-        .await?
+        .await
+        .map_err(reqwest::Error::without_url)
+        .map_err(RegisterError::Request)?;
+
+    let status = resp.status();
+    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(RegisterError::Status(status));
+    }
+    let body: serde_json::Value = resp
         .json()
-        .await?;
+        .await
+        .map_err(reqwest::Error::without_url)
+        .map_err(RegisterError::Request)?;
 
     if body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         Ok(())
@@ -66,13 +102,45 @@ pub async fn register_bot(
     }
 }
 
-/// Register every bot that has a token. Failures are logged, never fatal:
-/// Telegram being unreachable must not take down the gateway.
-pub async fn register_all(config: &Config, api_base: &str) {
+/// Retry registering a single bot up to 5 attempts with backoff.
+pub async fn register_bot_with_backoff(
+    client: &reqwest::Client,
+    api_base: &str,
+    bot: &BotConfig,
+    public_url: &str,
+    base_delay: Duration,
+) -> Result<(), RegisterError> {
+    let mut attempts = 0;
+    let mut delay = base_delay;
+    loop {
+        attempts += 1;
+        match register_bot(client, api_base, bot, public_url).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if attempts >= 5 || !err.is_retryable() {
+                    return Err(err);
+                }
+                tracing::warn!(
+                    bot_id = %bot.id,
+                    attempt = attempts,
+                    retry_in = ?delay,
+                    error = %err,
+                    "webhook registration failed; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2);
+            }
+        }
+    }
+}
+
+/// Internal implementation of `register_all` taking an injectable base delay.
+#[doc(hidden)]
+pub async fn register_all_with_delay(config: &Config, api_base: &str, base_delay: Duration) {
     let Some(public_url) = config.public_url.as_deref() else {
         return;
     };
-    let client = reqwest::Client::new();
+    let client = default_client();
     for bot in &config.bots {
         if bot.bot_token.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
             tracing::debug!(
@@ -81,7 +149,7 @@ pub async fn register_all(config: &Config, api_base: &str) {
             );
             continue;
         }
-        match register_bot(&client, api_base, bot, public_url).await {
+        match register_bot_with_backoff(&client, api_base, bot, public_url, base_delay).await {
             Ok(()) => tracing::info!(
                 bot_id = %bot.id,
                 url = webhook_url(public_url, &bot.id),
@@ -96,6 +164,11 @@ pub async fn register_all(config: &Config, api_base: &str) {
     }
 }
 
+/// Register every bot that has a token. Failures are logged, never fatal:
+/// Telegram being unreachable must not take down the gateway.
+pub async fn register_all(config: &Config, api_base: &str) {
+    register_all_with_delay(config, api_base, Duration::from_secs(2)).await;
+}
 #[cfg(test)]
 mod tests {
     use super::*;

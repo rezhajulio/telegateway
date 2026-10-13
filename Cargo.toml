@@ -3,6 +3,7 @@ name = "telegateway"
 version = "0.1.0"
 edition = "2024"
 description = "A reverse-proxy gateway for Telegram bots: webhook ingress, per-chat rate limiting, and structured observability."
+rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/rezhajulio/telegateway"
 authors = ["Rezha Julio <contact@rezhajulio.id>"]
@@ -38,16 +39,17 @@ sqlx-sqlite = { version = "0.8", features = ["bundled"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
-tower = { version = "0.5", features = ["util", "limit", "timeout"] }
+tower = { version = "0.5", features = ["util", "limit", "timeout", "load-shed"] }
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.29"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+proptest = "1"
 rcgen = "0.13"
-tower = { version = "0.5", features = ["util"] }
-
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
 [profile.release]
 strip = true
 lto = true

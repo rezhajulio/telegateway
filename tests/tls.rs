@@ -6,20 +6,15 @@ use std::net::SocketAddr;
 use telegateway::{app, config};
 
 /// Generate a self-signed certificate for localhost and return the paths
-/// of the PEM files, plus the directory to clean up afterwards.
-fn self_signed_pems() -> (String, String, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("telegateway-tls-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+/// of the PEM files, holding the TempDir for cleanup.
+fn self_signed_pems() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
     let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-    let cert_path = dir.join("cert.pem");
-    let key_path = dir.join("key.pem");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
     std::fs::write(&cert_path, certified_key.cert.pem()).unwrap();
     std::fs::write(&key_path, certified_key.key_pair.serialize_pem()).unwrap();
-    (
-        cert_path.to_string_lossy().into_owned(),
-        key_path.to_string_lossy().into_owned(),
-        dir,
-    )
+    (dir, cert_path, key_path)
 }
 
 /// Ask the OS for a free port.
@@ -30,9 +25,13 @@ fn free_port() -> u16 {
 
 #[tokio::test]
 async fn serves_https_when_tls_configured() {
-    let (cert_path, key_path, dir) = self_signed_pems();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (_dir, cert_path, key_path) = self_signed_pems();
+    let cert_str = cert_path.to_str().unwrap();
+    let key_str = key_path.to_str().unwrap();
     let port = free_port();
-    let db = std::env::temp_dir().join(format!("telegateway-tls-outbox-{}.db", std::process::id()));
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = db_dir.path().join("outbox.db");
     let db = db.to_str().unwrap();
     let toml = format!(
         r#"
@@ -42,8 +41,8 @@ listen = "127.0.0.1:{port}"
 path = "{db}"
 
 [tls]
-cert_path = "{cert_path}"
-key_path = "{key_path}"
+cert_path = "{cert_str}"
+key_path = "{key_str}"
 
 [[bots]]
 id = "demo"
@@ -79,21 +78,16 @@ webhook_secret = "s3cret"
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-
-    std::fs::remove_dir_all(&dir).ok();
 }
-
 #[tokio::test]
 async fn rejects_garbage_pem() {
-    let dir = std::env::temp_dir().join(format!("telegateway-tls-bad-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cert_path = dir.join("cert.pem");
-    let key_path = dir.join("key.pem");
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
     std::fs::write(&cert_path, "not a certificate").unwrap();
     std::fs::write(&key_path, "not a key").unwrap();
 
     let result = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await;
     assert!(result.is_err());
-
-    std::fs::remove_dir_all(&dir).ok();
 }

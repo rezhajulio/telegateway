@@ -3,7 +3,7 @@
 //! Webhook ingress: validate the secret, rate-limit per chat, persist to
 //! the outbox, and answer Telegram.
 use axum::{
-    Json,
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -35,8 +35,10 @@ pub async fn webhook_handler(
     State(state): State<AppState>,
     Path(bot_id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
+    tracing::Span::current().record("bot_id", bot_id.as_str());
+
     let bot = match state.bot(&bot_id) {
         Some(bot) => bot.clone(),
         None => {
@@ -50,7 +52,23 @@ pub async fn webhook_handler(
         return (StatusCode::UNAUTHORIZED, "bad webhook secret").into_response();
     }
 
-    let envelope = match telegram::envelope(&body) {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(bot_id = %bot_id, "rejected: invalid utf-8 payload");
+            return (StatusCode::BAD_REQUEST, "invalid utf-8 payload").into_response();
+        }
+    };
+
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(bot_id = %bot_id, error = %err, "rejected: invalid json");
+            return (StatusCode::BAD_REQUEST, "invalid json").into_response();
+        }
+    };
+
+    let envelope = match telegram::envelope(&value) {
         Ok(envelope) => envelope,
         Err(err) => {
             tracing::warn!(bot_id = %bot_id, error = %err, "rejected: bad update envelope");
@@ -58,6 +76,33 @@ pub async fn webhook_handler(
         }
     };
 
+    tracing::Span::current().record("update_id", envelope.update_id);
+
+    // Telegram redeliveries (duplicates) must not burn rate-limit quota,
+    // and rate-limited updates must not be persisted into the outbox.
+    // (a) Duplicate check: if update is already stored, answer 200 without consuming quota.
+    match state.store.find_payload(&bot_id, envelope.update_id).await {
+        Ok(Some(_)) => {
+            tracing::debug!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                "duplicate update ignored"
+            );
+            return (StatusCode::OK, "ok").into_response();
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                error = %err,
+                "outbox lookup failed"
+            );
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox unavailable").into_response();
+        }
+    }
+
+    // (b) Admission policy: rate limit check for new updates.
     if !state.policy.admit(&bot_id, envelope.chat_key) {
         tracing::warn!(
             bot_id = %bot_id,
@@ -68,17 +113,38 @@ pub async fn webhook_handler(
         return (StatusCode::OK, "rate limited").into_response();
     }
 
+    // (c) Queue cap check before persisting:
+    match state.store.pending_total(&bot_id).await {
+        Ok(pending) if pending >= 0 && (pending as u64) >= state.max_pending => {
+            tracing::warn!(
+                bot_id = %bot_id,
+                pending,
+                max_pending = state.max_pending,
+                "outbox full"
+            );
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox full").into_response();
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::error!(
+                bot_id = %bot_id,
+                error = %err,
+                "outbox pending_total check failed"
+            );
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox unavailable").into_response();
+        }
+    }
+
+    // (d) Persist original payload bytes. INSERT OR IGNORE guards concurrent races.
     match state
         .store
-        .insert(&bot_id, envelope.update_id, &body.to_string())
+        .insert(&bot_id, envelope.update_id, body_str)
         .await
     {
         Ok(true) => {
             crate::otel::metrics()
                 .updates_accepted
                 .add(1, &crate::otel::bot_attrs(&bot_id));
-            tracing::Span::current().record("bot_id", bot_id.as_str());
-            tracing::Span::current().record("update_id", envelope.update_id);
             tracing::info!(
                 bot_id = %bot_id,
                 update_id = envelope.update_id,
@@ -87,11 +153,13 @@ pub async fn webhook_handler(
                 "update accepted"
             );
         }
-        Ok(false) => tracing::debug!(
-            bot_id = %bot_id,
-            update_id = envelope.update_id,
-            "duplicate update ignored"
-        ),
+        Ok(false) => {
+            tracing::debug!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                "duplicate update ignored"
+            );
+        }
         Err(err) => {
             tracing::error!(
                 bot_id = %bot_id,
@@ -110,7 +178,8 @@ pub async fn webhook_handler(
 }
 
 /// Constant-time comparison so the secret cannot be probed byte-by-byte
-/// through timing differences.
+/// through timing differences. Note: length differences may leak length,
+/// which is acceptable.
 fn secret_ok(headers: &HeaderMap, expected: &str) -> bool {
     let provided = headers
         .get(SECRET_HEADER)

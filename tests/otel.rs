@@ -2,21 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! OpenTelemetry configuration, initialization, and the instruments the
 //! pipeline records on.
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use telegateway::{config, otel, outbox::Store};
+use tempfile::NamedTempFile;
 
-fn temp_db() -> String {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir()
-        .join(format!(
-            "telegateway-otel-test-{}-{n}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_owned()
+fn temp_db() -> NamedTempFile {
+    NamedTempFile::new().unwrap()
 }
 
 fn base_toml(extra: &str) -> String {
@@ -96,7 +86,9 @@ fn otel_init_with_dead_endpoint_still_succeeds() {
 
 #[tokio::test]
 async fn pending_counts_groups_by_bot() {
-    let store = Store::open(&temp_db()).await.unwrap();
+    let file = temp_db();
+    let path = file.path().to_str().unwrap();
+    let store = Store::open(path).await.unwrap();
     store.insert("bot-a", 1, "{}").await.unwrap();
     store.insert("bot-a", 2, "{}").await.unwrap();
     store.insert("bot-b", 3, "{}").await.unwrap();
@@ -112,6 +104,8 @@ async fn pending_counts_groups_by_bot() {
 
 #[tokio::test]
 async fn pending_counts_empty_when_nothing_pending() {
-    let store = Store::open(&temp_db()).await.unwrap();
+    let file = temp_db();
+    let path = file.path().to_str().unwrap();
+    let store = Store::open(path).await.unwrap();
     assert!(store.pending_counts().await.unwrap().is_empty());
 }

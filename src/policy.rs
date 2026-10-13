@@ -12,8 +12,10 @@ use governor::{Quota, RateLimiter};
 
 use crate::config::BotConfig;
 
-type KeyedLimiter = RateLimiter<String, DashMapStateStore<String>, DefaultClock>;
+type KeyedLimiter = RateLimiter<i64, DashMapStateStore<i64>, DefaultClock>;
 
+/// Sentinel key for chat-less updates that have no associated user either.
+const CHATLESS_KEY: i64 = 0;
 /// Per-bot, per-chat admission control backed by token buckets.
 ///
 /// Each bot gets its own limiter configured from `rate_limit_per_minute`;
@@ -44,13 +46,18 @@ impl AdmissionPolicy {
     /// Returns `true` when the update is admitted, `false` when the chat's
     /// bucket is empty. Unknown bots are never admitted.
     pub fn admit(&self, bot_id: &str, chat_key: Option<i64>) -> bool {
-        let key = match chat_key {
-            Some(chat) => format!("{bot_id}:{chat}"),
-            None => format!("{bot_id}:*"),
-        };
+        let key = chat_key.unwrap_or(CHATLESS_KEY);
         match self.limiters.get(bot_id) {
             Some(limiter) => limiter.check_key(&key).is_ok(),
             None => false,
+        }
+    }
+
+    /// Evict stale rate limiting state and reclaim unused capacity.
+    pub fn prune(&self) {
+        for limiter in self.limiters.values() {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
         }
     }
 }
@@ -91,5 +98,22 @@ mod tests {
     fn unknown_bot_is_never_admitted() {
         let policy = AdmissionPolicy::new(&bots());
         assert!(!policy.admit("nope", Some(1)));
+    }
+
+    #[test]
+    fn chatless_updates_use_sentinel_key() {
+        let policy = AdmissionPolicy::new(&bots());
+        assert!(policy.admit("demo", None));
+        assert!(policy.admit("demo", None));
+        assert!(!policy.admit("demo", None));
+        // Explicit chat key still has its own quota.
+        assert!(policy.admit("demo", Some(1)));
+    }
+
+    #[test]
+    fn prune_does_not_panic() {
+        let policy = AdmissionPolicy::new(&bots());
+        policy.admit("demo", Some(1));
+        policy.prune();
     }
 }

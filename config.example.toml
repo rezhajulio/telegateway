@@ -7,7 +7,9 @@ listen = "127.0.0.1:8080"
 # [outbox]
 # path = "outbox.db"
 # max_attempts = 25
-
+# poll_interval_ms = 1000
+# delivered_retention_days = 7
+# max_pending = 10000        # webhook sheds with 503 when pending+in_flight reaches this
 # Circuit breaker per downstream bot: after this many consecutive
 # failures, delivery pauses for cooldown_secs, then a probe goes out.
 # [circuit_breaker]
@@ -16,10 +18,12 @@ listen = "127.0.0.1:8080"
 # max_cooldown_secs = 600
 
 # Admin API: guards the /outbox listing and /outbox/replay routes.
-# The routes are not registered without this section.
+# The routes are not registered without this section. Token must be at least 32 chars.
 # [admin]
-# token = "change-me-to-a-long-random-value"
-
+# token = "change-me-to-a-long-random-value-at-least-32-chars"
+# Optional: serve admin routes on a separate socket address. When set, admin
+# routes are absent from the public listener. Must differ from `listen`.
+# listen = "127.0.0.1:9090"
 # OpenTelemetry: export traces and metrics via OTLP/HTTP to a collector.
 # Without this section, nothing leaves the process. A dead collector only
 # drops telemetry; it never breaks the gateway.
@@ -45,13 +49,13 @@ id = "mediadownloadbot"
 # bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 # Internal bot endpoint that receives the forwarded update.
 downstream_url = "http://127.0.0.1:8081/webhook"
-# Must match the secret passed to Telegram's setWebhook.
-webhook_secret = "change-me-to-a-long-random-value"
+# Must match the secret passed to Telegram's setWebhook (1-256 chars, [A-Za-z0-9_-]).
+webhook_secret = "change_me_to_a_long_random_value"
 # Token-bucket quota per chat, refilled every minute.
 rate_limit_per_minute = 30
 
 # [[bots]]
 # id = "second-bot"
 # downstream_url = "http://127.0.0.1:8082/webhook"
-# webhook_secret = "another-long-random-value"
+# webhook_secret = "another_long_random_value"
 # rate_limit_per_minute = 60

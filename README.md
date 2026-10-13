@@ -60,23 +60,27 @@ machine. Bots without a token are skipped.
 | `POST` | `/webhooks/:bot_id` | Telegram webhook ingress for bot `:bot_id`. |
 | `GET`  | `/healthz`          | Liveness probe.                             |
 | `GET`  | `/readyz`           | Readiness probe (checks the outbox database). |
-| `GET`  | `/outbox/dead`      | Dead-lettered updates (admin token only).   |
-
+| `GET`  | `/outbox`           | List outbox rows (admin token only; on admin listener if configured). |
+| `POST` | `/outbox/replay`    | Replay an update (admin token only; on admin listener if configured). |
 ### Webhook response contract
 
 | Status | Meaning                                                        |
 | ------ | -------------------------------------------------------------- |
 | `200`  | Update accepted into the outbox, duplicate, or rejected by admission policy. |
 | `400`  | Malformed update (missing `update_id`).                        |
-| `401`  | Wrong or missing webhook secret.                               |
+| `401`  | Wrong or missing webhook secret (verified before body parse).   |
 | `404`  | Unknown bot id.                                                |
-| `503`  | Outbox unavailable (Telegram will retry).                      |
+| `503`  | Outbox unavailable, bot queue cap (`max_pending`) reached, or excess concurrent requests shed (Telegram will retry). |
 
 Accepted updates are delivered to the downstream bot asynchronously with
-retries; a downed bot no longer produces a `502`. Forwarded requests carry
-`X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers so the downstream
-bot can correlate and deduplicate (`update_id` is unique per bot, and
-delivery is at-least-once).
+retries; a downed bot no longer produces a `502`. Ingress verifies the bot
+and secret before parsing the body, storing and forwarding the exact raw
+bytes Telegram sent without re-serialization. Rate limiting keys on the chat
+or, when absent, the sending user; duplicate updates are checked before quota
+is consumed, and limiter state is pruned hourly. Forwarded requests carry
+`X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery ordering is
+at-least-once, per-bot sequential, best-effort (retries can reorder); downstream
+bots must deduplicate on `update_id`.
 
 ### Dead letters
 
@@ -96,8 +100,8 @@ path = "outbox.db"          # SQLite file holding queued updates
 max_attempts = 25           # retries before dead-lettering
 
 # [admin]
-# token = "a-long-random-value"  # guards GET /outbox/dead
-
+# token = "change-me-to-a-long-random-value-at-least-32-chars"
+# listen = "127.0.0.1:9090"    # optional separate listener for admin routes
 [[bots]]
 id = "mediadownloadbot"
 downstream_url = "http://127.0.0.1:8081/webhook"
@@ -111,11 +115,13 @@ rate_limit_per_minute = 30
 | `outbox.path`                | SQLite file for the durable outbox (default `outbox.db`).   |
 | `outbox.max_attempts`         | Delivery retries before dead-lettering (default `25`).      |
 | `outbox.poll_interval_ms`    | Retry sweep interval (default `1000`).                      |
-| `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30). |
-| `circuit_breaker.failure_threshold` | Consecutive failures that trip the breaker (default `5`). |
-| `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`). |
-| `circuit_breaker.max_cooldown_secs` | Cap for the doubling cooldown (default `600`). |
-| `admin.token`                | Bearer token for `/outbox/*`. Route absent when unset.       |
+| `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30; 1–36500). |
+| `outbox.max_pending`         | Max pending+in-flight rows per bot before 503 shedding (default `10000`, min `1`). |
+| `circuit_breaker.failure_threshold` | Consecutive failures that trip the breaker (default `5`, min `1`). |
+| `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`, min `1`). |
+| `circuit_breaker.max_cooldown_secs` | Cap for doubling cooldown (default `600`, must be `>= cooldown_secs`). |
+| `admin.token`                | Bearer token for `/outbox/*` (min 32 chars). Route absent when unset. |
+| `admin.listen`               | Optional separate address for admin API; absent from public listener when set. |
 | `otel.endpoint`              | OTLP/HTTP collector base URL for traces and metrics. Export off when unset. |
 | `otel.service_name`          | `service.name` resource attribute (default `telegateway`).  |
 | `bots[].id`                  | Public id used in the webhook route. Must be unique.         |
@@ -157,8 +163,7 @@ key_path = "/etc/telegateway/privkey.pem"
 With `[tls]` present, `listen` serves HTTPS instead of plain HTTP. Without
 it, the gateway speaks plain HTTP and expects TLS to be terminated upstream.
 Certificate issuance and renewal stay your job (certbot, Caddy, your CA);
-restart the process to pick up renewed certificates.
-
+send `SIGHUP` to reload certificates without dropping connections.
 ## Install from source
 
 You need the [Rust toolchain](https://rustup.rs) (1.85+):
@@ -179,10 +184,9 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the release process,
 ## Docker
 
 Multi-stage build: Rust compiles the release binary, and the runtime image
-is `debian:bookworm-slim` with only CA certificates added (SQLite is
-statically linked). It runs as a non-root user and keeps the outbox database
-in `/data`.
-
+is `debian:bookworm-slim` with CA certificates and a container `HEALTHCHECK`
+probing `/healthz` (SQLite is statically linked). It runs as a non-root user
+and keeps the outbox database in `/data`.
 ```sh
 docker build -t telegateway .
 docker run -d --name telegateway \
@@ -198,17 +202,17 @@ The container expects the config at `/data/config.toml` (override with
 the container.
 
 ## How it works
-
 ```
 Telegram ──POST /webhooks/:bot_id──▶ telegateway ──POST──▶ your bot (private net)
                                     │
-                                    ├─ validate webhook secret (constant-time)
-                                    ├─ extract update envelope (update_id, kind, chat)
-                                    ├─ per-chat token bucket (rejections answer 200)
-                                    ├─ forward with 25s timeout + gateway headers
-                                    └─ JSON log: bot_id, update_id, kind, chat, status, latency
+                                    ├─ verify bot + webhook secret before parsing body
+                                    ├─ check duplicates before consuming rate limit
+                                    ├─ rate limit on chat (or sender user if no chat)
+                                    ├─ check outbox.max_pending queue cap (shed 503 if full)
+                                    ├─ persist raw bytes to SQLite outbox (WAL)
+                                    └─ async sequential delivery: 5s connect timeout, no redirects,
+                                       honor Retry-After on 429/503, 4xx (not 408/425/429) dead-lettered
 ```
-
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design: component breakdown, design patterns, security model, and failure handling.
 
 ## Examples

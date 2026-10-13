@@ -66,10 +66,10 @@ Trust boundaries:
 ## 4. Request lifecycle
 
 ```
-1. Authenticate   verify X-Telegram-Bot-Api-Secret-Token in constant time
-2. Adapt          extract (update_id, kind, chat_key) from the raw JSON
-3. Admit          per-chat token bucket; rejections answer 200
-4. Persist        INSERT OR IGNORE into the outbox (dedupe on update_id)
+1. Authenticate   verify bot exists and X-Telegram-Bot-Api-Secret-Token in constant time before parsing body
+2. Adapt & Dedupe extract (update_id, kind, chat_key/user_key); check duplicate before consuming quota
+3. Admit          token bucket on chat (or sender user); rejections answer 200; memory pruned hourly
+4. Persist        verify outbox.max_pending cap (shed 503 if reached); write original raw bytes to outbox
 5. Observe        structured log: bot_id, update_id, kind, chat
 ```
 
@@ -83,9 +83,8 @@ Response contract with Telegram:
 | Accepted into the outbox         | 200    | Normal path; delivery is async.            |
 | Duplicate update_id              | 200    | Already queued; Telegram redelivered.      |
 | Rejected by admission policy     | 200    | Telegram must not retry a policy decision. |
-| Malformed update / bad secret / unknown bot | 4xx | Client error; retrying won't help.  |
-| Outbox unavailable               | 503    | Retryable; Telegram will redeliver.        |
-
+| Malformed update / bad secret / unknown bot | 4xx | Client error; retrying won't help. Secret checked before parse. |
+| Outbox unavailable / queue full  | 503    | Retryable (`max_pending` reached or DB busy); Telegram will redeliver. |
 ## 5. Components
 
 | Module            | Responsibility                                                        |
@@ -106,34 +105,38 @@ Response contract with Telegram:
 An accepted update is a promise. The gateway keeps it in SQLite (WAL mode)
 before answering Telegram, so a crashed or downed bot loses nothing.
 
-- **Ingest** writes the raw JSON with `INSERT OR IGNORE` on
-  `(bot_id, update_id)`; a Telegram redelivery is a no-op.
+- **Ingest** writes the original raw JSON bytes with `INSERT OR IGNORE` on
+  `(bot_id, update_id)`; a Telegram redelivery is a no-op. If a bot's pending
+  plus in-flight rows reach `outbox.max_pending`, new updates are shed with 503.
 - **Delivery** runs one task per bot. It claims due rows atomically
   (`UPDATE ... RETURNING`, bumping `attempts`), forwards each downstream
-  with the 25s timeout and the gateway correlation headers, then marks the
-  row `delivered` or schedules the next attempt.
+  with a 5s connect timeout, 25s total timeout, no redirect following, and the
+  gateway correlation headers. Timeout yields status 504. Delivery errors
+  strip downstream and Telegram URLs to prevent credential leaks.
+- **Downstream status**: 4xx responses (except 408, 425, 429) dead-letter
+  immediately and do not trip the circuit breaker. `Retry-After` headers on
+  429 and 503 are honored.
 - **Retries** back off exponentially (5s doubling, ±20% jitter, capped at
   1h). After `outbox.max_attempts` failures the row is dead-lettered with
-  its last error; `GET /outbox/dead` (admin token) lists the trail.
-- **Crashes**: on open, rows left `in_flight` are requeued as `pending`.
-  Delivery is at-least-once; downstream bots dedupe on `update_id`.
+  its last error; `GET /outbox` lists the trail.
+- **Crashes**: on open, rows left `in_flight` are requeued as `pending`,
+  preserving existing backoff. Delivery is at-least-once; downstream bots
+  dedupe on `update_id`.
 - **Circuit breaker**: each bot has an in-memory breaker (closed → open →
   half-open). After `circuit_breaker.failure_threshold` consecutive
   failures the dispatcher stops attempting delivery entirely instead of
-  burning retry attempts against a dead endpoint. After
-  `circuit_breaker.cooldown_secs` one probe goes out: success closes the
-  breaker and wakes the bot's pending rows for immediate drain (recovery
-  is detected within one cooldown, not one backoff cycle); failure
-  reopens it with a doubled cooldown, capped at `max_cooldown_secs`.
-  State is in-memory like the rate limiter — a restart simply starts
-  closed and re-trips if the bot is still down.
-- **Hygiene**: a janitor prunes delivered rows after
+  burning retry attempts against a dead endpoint; requeuing rows while open
+  no longer increments attempts. After `circuit_breaker.cooldown_secs` one
+  probe goes out: success closes the breaker and wakes the bot's pending rows
+  for immediate drain; failure reopens it with a doubled cooldown, capped at
+  `max_cooldown_secs`. State is in-memory like the rate limiter.
+- **Hygiene & Schema**: a janitor prunes delivered rows after
   `outbox.delivered_retention_days` (default 7) and dead letters after
-  30 days.
-- **Ordering**: each bot's dispatcher works sequentially, so per-bot order
-  is preserved in the common case; retries can still reorder around a
-  poisoned update. Cross-bot ordering is not guaranteed.
-
+  30 days. DB migration 002 enforces a status CHECK constraint and adds
+  an optimized index for atomic claims.
+- **Ordering**: each bot's dispatcher works sequentially; delivery ordering
+  is at-least-once, per-bot sequential, best-effort order (retries reorder
+  around failed updates). Downstream must deduplicate on `update_id`.
 One crate, one binary.
 
 ## 6. Design patterns
@@ -171,9 +174,8 @@ in logs or error responses.
 
 With `auto_register = true` and `public_url` set, the gateway calls
 `setWebhook` for every bot that has a `bot_token` when it starts, in a
-background task after the listener binds. Registration failures are logged
-and never stop the gateway; bots without a token are skipped.
-
+background task after the listener binds, retrying failures with backoff.
+Bots without a token are skipped.
 ## 8. Security
 
 - Webhook secrets are compared in constant time.
@@ -198,10 +200,13 @@ and never stop the gateway; bots without a token are skipped.
   replays, and webhook registration; metrics are per-bot counters (accepted,
   delivered, failed, dead-lettered, replayed), delivery latency, pending
   outbox depth, and breaker state (0 closed / 1 open / 2 half-open).
-  Downstream requests carry W3C `traceparent` headers. Export is batched and
-  async — a dead collector only drops telemetry, never requests. SIGTERM /
-  SIGINT trigger graceful shutdown with provider flush.
-
+Downstream requests carry W3C `traceparent` headers. Export is batched and
+async — a dead collector only drops telemetry, never requests. Outbox gauge
+reports 0 for idle bots. SIGTERM / SIGINT trigger graceful shutdown with
+provider flush; dispatchers finish any in-flight delivery before stopping.
+If a dispatcher task exits unexpectedly, the process terminates with non-zero
+status so the orchestrator can restart it. SIGHUP triggers live reloading of
+TLS certificate and private key files.
 ## 10. Failure handling
 
 - The outbox is the durability boundary: once Telegram gets a 200, the
@@ -209,11 +214,10 @@ and never stop the gateway; bots without a token are skipped.
 - A 503 tells Telegram to retry; a policy rejection answers 200 so abusive
   traffic is not amplified by retries.
 - Delivery is at-least-once; downstream bots dedupe on `update_id`.
-- `ConcurrencyLimitLayer` (512) bounds in-flight ingress work; excess
-  connections wait instead of piling onto the database.
+- `ConcurrencyLimitLayer` (512) and `LoadShedLayer` bound in-flight ingress work;
+  excess connections are shed with 503 instead of queueing unboundedly.
 - Panics in a handler cannot take down the process: each connection is an
   independent Tokio task.
-
 ## 11. Deployment
 
 Single static binary. Recommended topology: TLS edge → telegateway →

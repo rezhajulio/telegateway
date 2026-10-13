@@ -8,27 +8,13 @@ use axum::{
 };
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use telegateway::{app, config::Config};
 use tower::ServiceExt;
 
 const SECRET: &str = "test-secret";
-const ADMIN_SECRET: &str = "admin-secret";
+const ADMIN_SECRET: &str = "admin-secret-0123456789-abcdefghijklmnop";
 
-fn temp_db() -> String {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir()
-        .join(format!(
-            "telegateway-gateway-test-{}-{n}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
-fn test_config(downstream_url: String, rate_limit_per_minute: u32) -> Config {
+fn test_config(downstream_url: String, rate_limit_per_minute: u32) -> (tempfile::TempDir, Config) {
     test_config_full(downstream_url, rate_limit_per_minute, false)
 }
 
@@ -36,10 +22,31 @@ fn test_config_full(
     downstream_url: String,
     rate_limit_per_minute: u32,
     with_admin: bool,
-) -> Config {
-    let db = temp_db();
+) -> (tempfile::TempDir, Config) {
+    test_config_with_admin(
+        downstream_url,
+        rate_limit_per_minute,
+        with_admin,
+        None,
+        10_000,
+    )
+}
+
+fn test_config_with_admin(
+    downstream_url: String,
+    rate_limit_per_minute: u32,
+    with_admin: bool,
+    admin_listen: Option<&str>,
+    max_pending: u64,
+) -> (tempfile::TempDir, Config) {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let db = tmp.path().join("outbox.db").to_str().unwrap().to_owned();
     let admin = if with_admin {
-        format!("[admin]\ntoken = \"{ADMIN_SECRET}\"\n")
+        if let Some(listen) = admin_listen {
+            format!("[admin]\ntoken = \"{ADMIN_SECRET}\"\nlisten = \"{listen}\"\n")
+        } else {
+            format!("[admin]\ntoken = \"{ADMIN_SECRET}\"\n")
+        }
     } else {
         String::new()
     };
@@ -49,6 +56,7 @@ listen = "127.0.0.1:0"
 
 [outbox]
 path = "{db}"
+max_pending = {max_pending}
 
 {admin}
 [[bots]]
@@ -58,8 +66,8 @@ webhook_secret = "{SECRET}"
 rate_limit_per_minute = {rate_limit_per_minute}
 "#
     );
-    // Reuse the same validation the binary applies.
-    telegateway::config::load_from_str(&toml).unwrap()
+    let cfg = telegateway::config::load_from_str(&toml).unwrap();
+    (tmp, cfg)
 }
 
 fn authed(path: &str, body: serde_json::Value) -> Request<Body> {
@@ -107,9 +115,8 @@ async fn stub_downstream() -> (String, tokio::sync::mpsc::UnboundedReceiver<Stri
 #[tokio::test]
 async fn health_endpoints_answer_ok() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     for path in ["/healthz", "/readyz"] {
         let resp = built
@@ -125,9 +132,8 @@ async fn health_endpoints_answer_ok() {
 #[tokio::test]
 async fn unknown_bot_is_404() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     let resp = built
         .router
@@ -140,9 +146,8 @@ async fn unknown_bot_is_404() {
 #[tokio::test]
 async fn bad_secret_is_401() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     let req = Request::builder()
         .method("POST")
@@ -158,9 +163,8 @@ async fn bad_secret_is_401() {
 #[tokio::test]
 async fn accepted_update_is_persisted_then_forwarded() {
     let (downstream, mut rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     // Ingest answers 200 once the update is persisted, without waiting
     // for downstream.
@@ -186,9 +190,8 @@ async fn accepted_update_is_persisted_then_forwarded() {
 #[tokio::test]
 async fn duplicate_update_is_accepted_once() {
     let (downstream, mut rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     for _ in 0..2 {
         let resp = built
@@ -212,7 +215,8 @@ async fn duplicate_update_is_accepted_once() {
 async fn rate_limited_updates_answer_200_without_forwarding() {
     let (downstream, mut rx) = stub_downstream().await;
     // Quota of 1 per minute: the second update from the same chat is rejected.
-    let built = app::build_router(test_config(downstream, 1)).await.unwrap();
+    let (_tmp, config) = test_config(downstream, 1);
+    let built = app::build_router(config).await.unwrap();
 
     let first = built
         .router
@@ -241,9 +245,8 @@ async fn rate_limited_updates_answer_200_without_forwarding() {
 #[tokio::test]
 async fn downstream_outage_is_accepted_for_retry() {
     // Nothing listens on this port.
-    let built = app::build_router(test_config("http://127.0.0.1:1/webhook".to_owned(), 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config("http://127.0.0.1:1/webhook".to_owned(), 30);
+    let built = app::build_router(config).await.unwrap();
 
     let resp = built
         .router
@@ -291,9 +294,8 @@ async fn read_json(router: axum::Router, req: Request<Body>) -> (StatusCode, ser
 #[tokio::test]
 async fn outbox_list_needs_admin_token() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config_full(downstream, 30, true))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
 
     let no_token = built
         .router
@@ -315,9 +317,8 @@ async fn outbox_list_needs_admin_token() {
 #[tokio::test]
 async fn outbox_list_filters_and_validates() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config_full(downstream, 30, true))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
 
     // Seed one pending row via the webhook.
     let resp = built
@@ -358,9 +359,8 @@ async fn outbox_list_filters_and_validates() {
 #[tokio::test]
 async fn admin_routes_missing_without_token_config() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config(downstream, 30))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
 
     for req in [
         admin_get("/outbox", Some(ADMIN_SECRET)),
@@ -378,9 +378,8 @@ async fn admin_routes_missing_without_token_config() {
 #[tokio::test]
 async fn replay_delivers_stored_update() {
     let (downstream, mut rx) = stub_downstream().await;
-    let built = app::build_router(test_config_full(downstream, 30, true))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
 
     built
         .router
@@ -411,9 +410,8 @@ async fn replay_delivers_stored_update() {
 #[tokio::test]
 async fn replay_accepts_adhoc_payload() {
     let (downstream, mut rx) = stub_downstream().await;
-    let built = app::build_router(test_config_full(downstream, 30, true))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
 
     let (status, _) = read_json(
         built.router,
@@ -433,9 +431,8 @@ async fn replay_accepts_adhoc_payload() {
 #[tokio::test]
 async fn replay_rejects_bad_requests() {
     let (downstream, _rx) = stub_downstream().await;
-    let built = app::build_router(test_config_full(downstream, 30, true))
-        .await
-        .unwrap();
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
 
     let post = async |body: serde_json::Value, token: Option<&str>| {
         built
@@ -498,14 +495,8 @@ async fn replay_rejects_bad_requests() {
 #[tokio::test]
 async fn replay_surfaces_downstream_failure() {
     // Nothing listens on this port.
-    let built = app::build_router(test_config_full(
-        "http://127.0.0.1:1/webhook".to_owned(),
-        30,
-        true,
-    ))
-    .await
-    .unwrap();
-
+    let (_tmp, config) = test_config_full("http://127.0.0.1:1/webhook".to_owned(), 30, true);
+    let built = app::build_router(config).await.unwrap();
     let (status, replayed) = read_json(
         built.router,
         admin_post(
@@ -518,4 +509,260 @@ async fn replay_surfaces_downstream_failure() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(replayed["ok"], false);
     assert!(replayed["error"].is_string());
+}
+
+#[tokio::test]
+async fn unauthenticated_non_json_body_is_401() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/webhooks/demo")
+        .header("content-type", "application/json")
+        .header("x-telegram-bot-api-secret-token", "wrong-secret")
+        .body(Body::from("this is definitely not json"))
+        .unwrap();
+    let resp = built.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn authenticated_invalid_json_is_400() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/webhooks/demo")
+        .header("content-type", "application/json")
+        .header("x-telegram-bot-api-secret-token", SECRET)
+        .body(Body::from("not json at all"))
+        .unwrap();
+    let resp = built.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stored_payload_preserves_exact_bytes() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
+
+    let raw_payload =
+        r#"{"z":1,"update_id":9007199254740999,"a":2,"message":{"chat":{"id":7},"text":"hi"}}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/webhooks/demo")
+        .header("content-type", "application/json")
+        .header("x-telegram-bot-api-secret-token", SECRET)
+        .body(Body::from(raw_payload))
+        .unwrap();
+    let resp = built.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = built
+        .store
+        .find_payload("demo", 9007199254740999)
+        .await
+        .unwrap()
+        .expect("payload should be found in outbox");
+    assert_eq!(stored, raw_payload);
+}
+
+#[tokio::test]
+async fn duplicate_does_not_consume_rate_limit_quota() {
+    let (downstream, mut rx) = stub_downstream().await;
+    // Rate limit 1 per minute: update A is accepted, duplicate A is accepted without
+    // consuming extra quota or being blocked, and new update B is rate-limited.
+    let (_tmp, config) = test_config(downstream, 1);
+    let built = app::build_router(config).await.unwrap();
+
+    // 1. Initial update A is accepted.
+    let resp_a1 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(10, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_a1.status(), StatusCode::OK);
+
+    // 2. Duplicate update A is sent again: must be accepted as duplicate (status 200),
+    // not rejected by rate limiting.
+    let resp_a2 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(10, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_a2.status(), StatusCode::OK);
+
+    // 3. New update B for same chat is rate-limited (quota of 1 was consumed by A1).
+    let resp_b = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(11, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+
+    built.dispatchers[0].drain_once().await;
+    // Only update A should have been delivered to downstream.
+    let forwarded = rx.recv().await.expect("update 10 delivered");
+    let body: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    assert_eq!(body["update_id"], 10);
+    assert!(
+        rx.try_recv().is_err(),
+        "neither duplicate nor rate-limited update reaches downstream"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_does_not_burn_remaining_quota() {
+    let (downstream, mut rx) = stub_downstream().await;
+    // Rate limit 2 per minute: update A (uses 1), duplicate A (uses 0), update B (uses 1), update C (rate-limited).
+    let (_tmp, config) = test_config(downstream, 2);
+    let built = app::build_router(config).await.unwrap();
+
+    let resp_a1 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(30, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_a1.status(), StatusCode::OK);
+
+    let resp_a2 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(30, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_a2.status(), StatusCode::OK);
+
+    // If duplicate A burned quota, B would be rejected. With duplicate dedupe first, B is admitted.
+    let resp_b = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(31, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+
+    // Third unique update is rejected by rate limit.
+    let resp_c = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(32, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp_c.status(), StatusCode::OK);
+
+    built.dispatchers[0].drain_once().await;
+    let f1 = rx.recv().await.unwrap();
+    let body1: serde_json::Value = serde_json::from_str(&f1).unwrap();
+    assert_eq!(body1["update_id"], 30);
+    let f2 = rx.recv().await.unwrap();
+    let body2: serde_json::Value = serde_json::from_str(&f2).unwrap();
+    assert_eq!(body2["update_id"], 31);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn rate_limited_update_is_not_persisted() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config(downstream, 1);
+    let built = app::build_router(config).await.unwrap();
+
+    let resp1 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(100, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+    assert!(
+        built
+            .store
+            .find_payload("demo", 100)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let resp2 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(101, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    let stored = built.store.find_payload("demo", 101).await.unwrap();
+    assert_eq!(stored, None, "rate-limited update must not be persisted");
+}
+
+#[tokio::test]
+async fn queue_cap_returns_503_when_max_pending_reached() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config_with_admin(downstream, 30, false, None, 1);
+    let built = app::build_router(config).await.unwrap();
+
+    let resp1 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(201, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let resp2 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(202, 8)))
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn admin_replay_without_token_returns_401_before_body_parsing() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config_full(downstream, 30, true);
+    let built = app::build_router(config).await.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/outbox/replay")
+        .header("content-type", "application/json")
+        .body(Body::from("this is definitely not valid json"))
+        .unwrap();
+    let resp = built.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_on_separate_router_when_admin_listen_set() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) =
+        test_config_with_admin(downstream, 30, true, Some("127.0.0.1:8089"), 10_000);
+    let built = app::build_router(config).await.unwrap();
+
+    assert!(built.admin_router.is_some());
+    let admin_router = built.admin_router.unwrap();
+
+    let resp_pub = built
+        .router
+        .oneshot(admin_get("/outbox", Some(ADMIN_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(resp_pub.status(), StatusCode::NOT_FOUND);
+
+    let resp_admin = admin_router
+        .oneshot(admin_get("/outbox", Some(ADMIN_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(resp_admin.status(), StatusCode::OK);
 }

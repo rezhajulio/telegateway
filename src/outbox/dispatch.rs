@@ -16,6 +16,52 @@ use super::{CircuitBreaker, Decision, OutboxRow, Store, now_millis};
 /// How many rows one drain pass claims at most.
 const CLAIM_LIMIT: i64 = 32;
 
+/// Delivery error from downstream HTTP request.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum DeliveryError {
+    /// Network / protocol / timeout transport error without credential URLs.
+    #[error("{0}")]
+    Transport(String),
+    /// Downstream HTTP status code and optional `Retry-After` duration.
+    #[error("downstream answered {status}")]
+    Status {
+        /// Downstream HTTP response status.
+        status: reqwest::StatusCode,
+        /// Optional Retry-After duration.
+        retry_after: Option<Duration>,
+    },
+}
+
+impl DeliveryError {
+    /// Returns the status code if this is a Status error.
+    pub fn status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::Status { status, .. } => Some(*status),
+            Self::Transport(_) => None,
+        }
+    }
+
+    /// Returns the Retry-After duration if present.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Status { retry_after, .. } => *retry_after,
+            Self::Transport(_) => None,
+        }
+    }
+}
+
+fn is_permanent(err: &DeliveryError) -> bool {
+    match err {
+        DeliveryError::Status { status, .. } => {
+            status.is_client_error()
+                && *status != reqwest::StatusCode::REQUEST_TIMEOUT
+                && *status != reqwest::StatusCode::TOO_EARLY
+                && *status != reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
+        DeliveryError::Transport(_) => false,
+    }
+}
+
 /// Forward one payload to the downstream bot. Shared by the dispatcher
 /// and the replay API.
 pub async fn deliver_payload(
@@ -23,7 +69,7 @@ pub async fn deliver_payload(
     bot: &BotConfig,
     update_id: i64,
     payload: &str,
-) -> Result<axum::http::StatusCode, String> {
+) -> Result<axum::http::StatusCode, DeliveryError> {
     let mut trace_headers = reqwest::header::HeaderMap::new();
     crate::otel::inject_trace_context(&mut trace_headers);
     let resp = http
@@ -36,12 +82,21 @@ pub async fn deliver_payload(
         .body(payload.to_owned())
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DeliveryError::Transport(e.without_url().to_string()))?;
     let status = resp.status();
     if status.is_success() {
         Ok(status)
     } else {
-        Err(format!("downstream answered {status}"))
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        Err(DeliveryError::Status {
+            status,
+            retry_after,
+        })
     }
 }
 
@@ -74,26 +129,37 @@ impl Dispatcher {
             http,
             bot,
             max_attempts,
-            poll_interval,
+            poll_interval: poll_interval.max(Duration::from_millis(1)),
             notify,
             breaker: Mutex::new(breaker),
         }
     }
 
-    fn decide(&self) -> Decision {
-        self.breaker
-            .lock()
-            .expect("breaker mutex poisoned")
-            .decide(Instant::now())
+    fn lock_breaker(&self) -> std::sync::MutexGuard<'_, CircuitBreaker> {
+        self.breaker.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[doc(hidden)] // test support
+    pub fn decide(&self) -> Decision {
+        self.lock_breaker().decide(Instant::now())
     }
 
     /// Process every currently-due row once, sequentially. Returns the
     /// number of rows handled. Stops early (requeueing unattempted rows)
-    /// when the circuit breaker opens mid-drain.
+    /// when the circuit breaker opens mid-drain or shutdown occurs.
     pub async fn drain_once(&self) -> usize {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        self.drain_once_with_shutdown(&rx).await
+    }
+
+    /// Process due rows while checking shutdown and breaker between rows.
+    pub async fn drain_once_with_shutdown(
+        &self,
+        shutdown: &tokio::sync::watch::Receiver<bool>,
+    ) -> usize {
         let mut done = 0;
         loop {
-            if !matches!(self.decide(), Decision::Allow) {
+            if *shutdown.borrow() || !matches!(self.decide(), Decision::Allow) {
                 break;
             }
             let rows = match self.store.claim_due(&self.bot.id, CLAIM_LIMIT).await {
@@ -108,13 +174,13 @@ impl Dispatcher {
             }
             let mut rows = rows.into_iter().peekable();
             while let Some(row) = rows.next() {
-                if !matches!(self.decide(), Decision::Allow) {
+                if *shutdown.borrow() || !matches!(self.decide(), Decision::Allow) {
                     let ids: Vec<i64> = std::iter::once(row.id).chain(rows.map(|r| r.id)).collect();
                     if let Err(e) = self.store.requeue(&ids).await {
                         tracing::error!(
                             bot_id = %self.bot.id,
                             error = %e,
-                            "failed to requeue rows after breaker opened"
+                            "failed to requeue rows after breaker opened or shutdown"
                         );
                     }
                     return done;
@@ -127,14 +193,35 @@ impl Dispatcher {
     }
 
     fn record_breaker_state(&self) {
-        let value = self
-            .breaker
-            .lock()
-            .expect("breaker mutex poisoned")
-            .gauge_value(Instant::now());
+        let value = self.lock_breaker().gauge_value(Instant::now());
         crate::otel::metrics()
             .breaker_state
             .record(value, &crate::otel::bot_attrs(&self.bot.id));
+    }
+
+    async fn mark_delivered_with_retry(&self, row_id: i64, update_id: i64) {
+        const RETRY_DELAYS: [Duration; 3] = [
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+            Duration::from_millis(800),
+        ];
+        let mut last_err = match self.store.mark_delivered(row_id).await {
+            Ok(()) => return,
+            Err(e) => e,
+        };
+        for delay in RETRY_DELAYS {
+            tokio::time::sleep(delay).await;
+            match self.store.mark_delivered(row_id).await {
+                Ok(()) => return,
+                Err(e) => last_err = e,
+            }
+        }
+        tracing::error!(
+            bot_id = %self.bot.id,
+            update_id,
+            error = %last_err,
+            "failed to mark update delivered after retries"
+        );
     }
 
     #[tracing::instrument(
@@ -148,23 +235,13 @@ impl Dispatcher {
         let attrs = crate::otel::bot_attrs(&self.bot.id);
         match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
             Ok(_) => {
-                self.breaker
-                    .lock()
-                    .expect("breaker mutex poisoned")
-                    .on_success();
+                self.lock_breaker().on_success();
                 self.record_breaker_state();
                 metrics.updates_delivered.add(1, &attrs);
                 metrics
                     .delivery_latency_ms
                     .record(started.elapsed().as_millis() as f64, &attrs);
-                if let Err(e) = self.store.mark_delivered(row.id).await {
-                    tracing::error!(
-                        bot_id = %self.bot.id,
-                        update_id = row.update_id,
-                        error = %e,
-                        "failed to mark update delivered"
-                    );
-                }
+                self.mark_delivered_with_retry(row.id, row.update_id).await;
                 tracing::info!(
                     bot_id = %self.bot.id,
                     update_id = row.update_id,
@@ -173,41 +250,69 @@ impl Dispatcher {
                 );
             }
             Err(error) => {
-                self.breaker
-                    .lock()
-                    .expect("breaker mutex poisoned")
-                    .on_failure(Instant::now());
-                self.record_breaker_state();
-                metrics.updates_failed.add(1, &attrs);
-                match self
-                    .store
-                    .mark_failed(row.id, &error, self.max_attempts)
-                    .await
-                {
-                    Ok(Some(delay)) => tracing::warn!(
-                        bot_id = %self.bot.id,
-                        update_id = row.update_id,
-                        attempt = row.attempts,
-                        retry_in_secs = delay.as_secs(),
-                        error = %error,
-                        "delivery failed, retrying"
-                    ),
-                    Ok(None) => {
-                        metrics.updates_dead_lettered.add(1, &attrs);
-                        tracing::warn!(
+                let err_str = error.to_string();
+                if is_permanent(&error) {
+                    metrics.updates_failed.add(1, &attrs);
+                    metrics.updates_dead_lettered.add(1, &attrs);
+                    if let Err(e) = self.store.mark_dead(row.id, &err_str).await {
+                        tracing::error!(
                             bot_id = %self.bot.id,
                             update_id = row.update_id,
-                            attempts = row.attempts,
-                            error = %error,
-                            "delivery failed, dead-lettered"
+                            error = %e,
+                            "failed to mark permanent failure dead"
                         );
                     }
-                    Err(e) => tracing::error!(
+                    tracing::warn!(
                         bot_id = %self.bot.id,
                         update_id = row.update_id,
-                        error = %e,
-                        "failed to record delivery failure"
-                    ),
+                        error = %err_str,
+                        "permanent delivery failure, dead-lettered"
+                    );
+                } else {
+                    self.lock_breaker().on_failure(Instant::now());
+                    self.record_breaker_state();
+                    metrics.updates_failed.add(1, &attrs);
+                    let min_delay = match &error {
+                        DeliveryError::Status {
+                            status,
+                            retry_after,
+                        } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE =>
+                        {
+                            *retry_after
+                        }
+                        _ => None,
+                    };
+                    match self
+                        .store
+                        .mark_failed_with_min_delay(row.id, &err_str, self.max_attempts, min_delay)
+                        .await
+                    {
+                        Ok(Some(delay)) => tracing::warn!(
+                            bot_id = %self.bot.id,
+                            update_id = row.update_id,
+                            attempt = row.attempts,
+                            retry_in_secs = delay.as_secs(),
+                            error = %err_str,
+                            "delivery failed, retrying"
+                        ),
+                        Ok(None) => {
+                            metrics.updates_dead_lettered.add(1, &attrs);
+                            tracing::warn!(
+                                bot_id = %self.bot.id,
+                                update_id = row.update_id,
+                                attempts = row.attempts,
+                                error = %err_str,
+                                "delivery failed, dead-lettered"
+                            );
+                        }
+                        Err(e) => tracing::error!(
+                            bot_id = %self.bot.id,
+                            update_id = row.update_id,
+                            error = %e,
+                            "failed to record delivery failure"
+                        ),
+                    }
                 }
             }
         }
@@ -215,18 +320,19 @@ impl Dispatcher {
 
     /// Send one probe delivery while half-open. On success the breaker
     /// closes and the bot's pending rows are woken for immediate drain;
-    /// on failure the breaker reopens with a doubled cooldown.
+    /// on failure the breaker reopens with a doubled cooldown (unless permanent).
+    /// Returns true if a delivery was attempted, false otherwise.
     #[tracing::instrument(name = "outbox.probe", skip(self), fields(bot_id = %self.bot.id))]
-    pub async fn probe(&self) {
+    pub async fn probe(&self) -> bool {
         let rows = match self.store.claim_due(&self.bot.id, 1).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(bot_id = %self.bot.id, error = %e, "outbox claim failed");
-                return;
+                return false;
             }
         };
         let Some(row) = rows.into_iter().next() else {
-            return;
+            return false;
         };
         tracing::info!(
             bot_id = %self.bot.id,
@@ -237,20 +343,10 @@ impl Dispatcher {
         let attrs = crate::otel::bot_attrs(&self.bot.id);
         match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
             Ok(_) => {
-                self.breaker
-                    .lock()
-                    .expect("breaker mutex poisoned")
-                    .on_success();
+                self.lock_breaker().on_success();
                 self.record_breaker_state();
                 metrics.updates_delivered.add(1, &attrs);
-                if let Err(e) = self.store.mark_delivered(row.id).await {
-                    tracing::error!(
-                        bot_id = %self.bot.id,
-                        update_id = row.update_id,
-                        error = %e,
-                        "failed to mark update delivered"
-                    );
-                }
+                self.mark_delivered_with_retry(row.id, row.update_id).await;
                 if let Err(e) = self.store.wake_pending(&self.bot.id).await {
                     tracing::error!(
                         bot_id = %self.bot.id,
@@ -261,48 +357,103 @@ impl Dispatcher {
                 self.notify.notify_one();
             }
             Err(error) => {
-                self.breaker
-                    .lock()
-                    .expect("breaker mutex poisoned")
-                    .on_failure(Instant::now());
-                self.record_breaker_state();
-                metrics.updates_failed.add(1, &attrs);
-                if let Err(e) = self
-                    .store
-                    .mark_failed(row.id, &error, self.max_attempts)
-                    .await
-                {
-                    tracing::error!(
+                let err_str = error.to_string();
+                if is_permanent(&error) {
+                    metrics.updates_failed.add(1, &attrs);
+                    metrics.updates_dead_lettered.add(1, &attrs);
+                    if let Err(e) = self.store.mark_dead(row.id, &err_str).await {
+                        tracing::error!(
+                            bot_id = %self.bot.id,
+                            update_id = row.update_id,
+                            error = %e,
+                            "failed to mark permanent failure dead"
+                        );
+                    }
+                    tracing::warn!(
                         bot_id = %self.bot.id,
                         update_id = row.update_id,
-                        error = %e,
-                        "failed to record delivery failure"
+                        error = %err_str,
+                        "permanent probe delivery failure, dead-lettered"
                     );
+                } else {
+                    self.lock_breaker().on_failure(Instant::now());
+                    self.record_breaker_state();
+                    metrics.updates_failed.add(1, &attrs);
+                    let min_delay = match &error {
+                        DeliveryError::Status {
+                            status,
+                            retry_after,
+                        } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE =>
+                        {
+                            *retry_after
+                        }
+                        _ => None,
+                    };
+                    match self
+                        .store
+                        .mark_failed_with_min_delay(row.id, &err_str, self.max_attempts, min_delay)
+                        .await
+                    {
+                        Ok(None) => {
+                            metrics.updates_dead_lettered.add(1, &attrs);
+                        }
+                        Ok(Some(_)) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                bot_id = %self.bot.id,
+                                update_id = row.update_id,
+                                error = %e,
+                                "failed to record delivery failure"
+                            );
+                        }
+                    }
                 }
             }
         }
+        true
     }
 
     /// Run the delivery loop: drain while the breaker allows, sleep while
-    /// it denies, probe while half-open.
-    pub async fn run(self: Arc<Self>) {
+    /// it denies, probe while half-open. Exits gracefully when shutdown is signaled.
+    pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         loop {
+            if *shutdown.borrow() {
+                break;
+            }
             match self.decide() {
                 Decision::Allow => {
-                    self.drain_once().await;
+                    self.drain_once_with_shutdown(&shutdown).await;
+                    if *shutdown.borrow() {
+                        break;
+                    }
                     tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() { break; }
+                        }
                         () = self.notify.notified() => {},
                         () = tokio::time::sleep(self.poll_interval) => {},
                     }
                 }
                 Decision::Deny { retry_after } => {
                     tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() { break; }
+                        }
                         () = self.notify.notified() => {},
                         () = tokio::time::sleep(retry_after) => {},
                     }
                 }
                 Decision::Probe => {
-                    self.probe().await;
+                    if !self.probe().await {
+                        tokio::select! {
+                            _ = shutdown.changed() => {
+                                if *shutdown.borrow() { break; }
+                            }
+                            () = self.notify.notified() => {},
+                            () = tokio::time::sleep(self.poll_interval) => {},
+                        }
+                    }
                 }
             }
         }
@@ -310,14 +461,30 @@ impl Dispatcher {
 }
 
 /// Periodically prune delivered rows older than `delivered_retention_days`
-/// and dead letters older than 30 days.
-pub async fn janitor(store: Store, delivered_retention_days: u64) {
+/// and dead letters older than 30 days. Exits gracefully when shutdown is signaled.
+pub async fn janitor(
+    store: Store,
+    delivered_retention_days: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(3600));
     loop {
-        interval.tick().await;
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            _ = interval.tick() => {}
+        }
+        if *shutdown.borrow() {
+            break;
+        }
         let now = now_millis();
-        let delivered_cutoff = now - delivered_retention_days as i64 * 86_400_000;
-        let dead_cutoff = now - 30 * 86_400_000;
+        let days = delivered_retention_days.min(36500) as i64;
+        let delivered_cutoff = now.saturating_sub(days.saturating_mul(86_400_000));
+        let dead_cutoff = now.saturating_sub(30 * 86_400_000);
         if let Err(e) = store.prune(delivered_cutoff, dead_cutoff).await {
             tracing::error!(error = %e, "outbox prune failed");
         }

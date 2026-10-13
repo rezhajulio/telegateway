@@ -4,6 +4,7 @@
 //! token is configured.
 use axum::{
     Json,
+    body::Bytes,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -88,20 +89,18 @@ struct ReplayResponse {
 /// Re-deliver a past update to a bot's downstream, synchronously, for
 /// debugging. The downstream sees the original `update_id`, so the bot
 /// treats it like the real thing.
-#[tracing::instrument(
-    name = "admin.replay",
-    skip(state, headers),
-    fields(bot_id = %req.bot_id)
-)]
-pub async fn replay(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<ReplayRequest>,
-) -> Response {
+#[tracing::instrument(name = "admin.replay", skip(state, headers, body))]
+pub async fn replay(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if !admin_ok(&state, &headers) {
         return admin_denied(&state);
     }
 
+    let req: ReplayRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("invalid json body: {err}")).into_response();
+        }
+    };
     let bot = match state.bot(&req.bot_id) {
         Some(bot) => bot.clone(),
         None => return (StatusCode::NOT_FOUND, "unknown bot").into_response(),
@@ -181,7 +180,7 @@ pub async fn replay(
                 bot_id: bot.id,
                 update_id,
                 downstream_status: None,
-                error: Some(error),
+                error: Some(error.to_string()),
             }),
         )
             .into_response(),
@@ -206,6 +205,7 @@ fn admin_denied(state: &AppState) -> Response {
     }
 }
 
+/// Constant-time check for the bearer token. Length difference may leak length.
 fn bearer_ok(headers: &HeaderMap, expected: &str) -> bool {
     let provided = headers
         .get("authorization")

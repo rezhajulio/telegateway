@@ -37,8 +37,9 @@ on every push and pull request. Keep all three green before pushing.
   `register_bot` takes the API base as a parameter so tests can point it
   at the stub.
 - **One database per test.** Integration tests that touch the outbox
-  create a unique temp SQLite file via `temp_db()` (atomic counter +
-  process id), so tests can run in parallel without interfering.
+  create a unique temp directory via `tempfile::tempdir()`, holding the
+  `TempDir` for the test's lifetime so tests run in parallel and clean up
+  deterministically.
 - **Observe, don't sleep.** Stubs report received requests over
   `tokio::sync::mpsc` channels; tests assert on what arrived instead of
   guessing at timing. Where timing is inherent (backoff, cooldowns),

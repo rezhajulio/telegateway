@@ -40,6 +40,18 @@ pub enum UpdateKind {
     ChatJoinRequest,
     /// `message_reaction`
     MessageReaction,
+    /// `message_reaction_count`
+    MessageReactionCount,
+    /// `business_connection`
+    BusinessConnection,
+    /// `deleted_business_messages`
+    DeletedBusinessMessages,
+    /// `chat_boost`
+    ChatBoost,
+    /// `removed_chat_boost`
+    RemovedChatBoost,
+    /// `purchased_paid_media`
+    PurchasedPaidMedia,
     /// Any other (or future) payload key.
     Other,
 }
@@ -86,7 +98,9 @@ pub fn envelope(value: &Value) -> Result<UpdateEnvelope, EnvelopeError> {
     } else if let Some(q) = value.get("callback_query") {
         (
             UpdateKind::CallbackQuery,
-            q.get("message").and_then(chat_id),
+            q.get("message")
+                .and_then(chat_id)
+                .or_else(|| q.get("from").and_then(user_id)),
         )
     } else if let Some(q) = value.get("inline_query") {
         (UpdateKind::InlineQuery, q.get("from").and_then(user_id))
@@ -95,22 +109,43 @@ pub fn envelope(value: &Value) -> Result<UpdateEnvelope, EnvelopeError> {
             UpdateKind::ChosenInlineResult,
             q.get("from").and_then(user_id),
         )
-    } else if value.get("shipping_query").is_some() {
-        (UpdateKind::ShippingQuery, None)
-    } else if value.get("pre_checkout_query").is_some() {
-        (UpdateKind::PreCheckoutQuery, None)
+    } else if let Some(q) = value.get("shipping_query") {
+        (UpdateKind::ShippingQuery, q.get("from").and_then(user_id))
+    } else if let Some(q) = value.get("pre_checkout_query") {
+        (
+            UpdateKind::PreCheckoutQuery,
+            q.get("from").and_then(user_id),
+        )
     } else if value.get("poll").is_some() {
         (UpdateKind::Poll, None)
     } else if let Some(a) = value.get("poll_answer") {
         (UpdateKind::PollAnswer, a.get("user").and_then(user_id))
     } else if let Some(m) = value.get("my_chat_member") {
-        (UpdateKind::MyChatMember, m.get("chat").and_then(chat_id))
+        (UpdateKind::MyChatMember, chat_id(m))
     } else if let Some(m) = value.get("chat_member") {
-        (UpdateKind::ChatMember, m.get("chat").and_then(chat_id))
+        (UpdateKind::ChatMember, chat_id(m))
     } else if let Some(r) = value.get("chat_join_request") {
-        (UpdateKind::ChatJoinRequest, r.get("chat").and_then(chat_id))
+        (UpdateKind::ChatJoinRequest, chat_id(r))
     } else if let Some(r) = value.get("message_reaction") {
-        (UpdateKind::MessageReaction, r.get("chat").and_then(chat_id))
+        (UpdateKind::MessageReaction, chat_id(r))
+    } else if let Some(r) = value.get("message_reaction_count") {
+        (UpdateKind::MessageReactionCount, chat_id(r))
+    } else if let Some(b) = value.get("business_connection") {
+        (
+            UpdateKind::BusinessConnection,
+            b.get("user").and_then(user_id),
+        )
+    } else if let Some(b) = value.get("deleted_business_messages") {
+        (UpdateKind::DeletedBusinessMessages, chat_id(b))
+    } else if let Some(b) = value.get("chat_boost") {
+        (UpdateKind::ChatBoost, chat_id(b))
+    } else if let Some(b) = value.get("removed_chat_boost") {
+        (UpdateKind::RemovedChatBoost, chat_id(b))
+    } else if let Some(m) = value.get("purchased_paid_media") {
+        (
+            UpdateKind::PurchasedPaidMedia,
+            m.get("from").and_then(user_id),
+        )
     } else {
         (UpdateKind::Other, None)
     };
@@ -178,5 +213,132 @@ mod tests {
     fn rejects_missing_update_id() {
         let update = json!({ "message": {} });
         assert!(envelope(&update).is_err());
+    }
+    #[test]
+    fn extracts_callback_query_without_message_fallback() {
+        let update = json!({
+            "update_id": 44,
+            "callback_query": {
+                "id": "abc",
+                "from": { "id": 99 }
+            }
+        });
+        let env = envelope(&update).unwrap();
+        assert_eq!(env.kind, UpdateKind::CallbackQuery);
+        assert_eq!(env.chat_key, Some(99));
+    }
+
+    #[test]
+    fn extracts_shipping_and_pre_checkout_query() {
+        let ship = json!({
+            "update_id": 45,
+            "shipping_query": {
+                "id": "s1",
+                "from": { "id": 101 }
+            }
+        });
+        let env = envelope(&ship).unwrap();
+        assert_eq!(env.kind, UpdateKind::ShippingQuery);
+        assert_eq!(env.chat_key, Some(101));
+
+        let checkout = json!({
+            "update_id": 46,
+            "pre_checkout_query": {
+                "id": "p1",
+                "from": { "id": 102 }
+            }
+        });
+        let env = envelope(&checkout).unwrap();
+        assert_eq!(env.kind, UpdateKind::PreCheckoutQuery);
+        assert_eq!(env.chat_key, Some(102));
+    }
+
+    #[test]
+    fn extracts_poll_has_no_chat_key() {
+        let update = json!({
+            "update_id": 47,
+            "poll": {
+                "id": "poll1"
+            }
+        });
+        let env = envelope(&update).unwrap();
+        assert_eq!(env.kind, UpdateKind::Poll);
+        assert_eq!(env.chat_key, None);
+    }
+
+    #[test]
+    fn extracts_new_telegram_kinds() {
+        let biz = json!({
+            "update_id": 48,
+            "business_connection": { "user": { "id": 201 } }
+        });
+        let env = envelope(&biz).unwrap();
+        assert_eq!(env.kind, UpdateKind::BusinessConnection);
+        assert_eq!(env.chat_key, Some(201));
+
+        let del = json!({
+            "update_id": 49,
+            "deleted_business_messages": { "chat": { "id": -1005 } }
+        });
+        let env = envelope(&del).unwrap();
+        assert_eq!(env.kind, UpdateKind::DeletedBusinessMessages);
+        assert_eq!(env.chat_key, Some(-1005));
+
+        let react = json!({
+            "update_id": 50,
+            "message_reaction_count": { "chat": { "id": -1006 } }
+        });
+        let env = envelope(&react).unwrap();
+        assert_eq!(env.kind, UpdateKind::MessageReactionCount);
+        assert_eq!(env.chat_key, Some(-1006));
+
+        let boost = json!({
+            "update_id": 51,
+            "chat_boost": { "chat": { "id": -1007 } }
+        });
+        let env = envelope(&boost).unwrap();
+        assert_eq!(env.kind, UpdateKind::ChatBoost);
+        assert_eq!(env.chat_key, Some(-1007));
+
+        let unboost = json!({
+            "update_id": 52,
+            "removed_chat_boost": { "chat": { "id": -1008 } }
+        });
+        let env = envelope(&unboost).unwrap();
+        assert_eq!(env.kind, UpdateKind::RemovedChatBoost);
+        assert_eq!(env.chat_key, Some(-1008));
+
+        let media = json!({
+            "update_id": 53,
+            "purchased_paid_media": { "from": { "id": 301 } }
+        });
+        let env = envelope(&media).unwrap();
+        assert_eq!(env.kind, UpdateKind::PurchasedPaidMedia);
+        assert_eq!(env.chat_key, Some(301));
+    }
+
+    use proptest::prelude::*;
+
+    fn arb_json() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            ".*".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                prop::collection::hash_map(".*", inner, 0..4)
+                    .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn envelope_never_panics_on_arbitrary_json(val in arb_json()) {
+            let _ = envelope(&val);
+        }
     }
 }

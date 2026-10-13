@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Config: `outbox.max_pending` bounds queued updates per bot (sheds with 503 when reached).
+- Config: `[admin] listen` serves admin routes on a dedicated socket address, removing them from the public listener.
+- Config: secrets (`bot_token`, `webhook_secret`, `admin.token`) are redacted as `[REDACTED]` in `Debug` output.
+- Ingress: load shedding with 503 when concurrency limit is saturated.
+- Ingress: rate limiting keys on chat ID or sender user ID when chat is omitted.
+- Downstream: honor `Retry-After` response headers on 429 and 503 responses.
+- Downstream: delivery ordering is per-bot sequential and best-effort (at-least-once; downstreams dedupe on `update_id`).
+- Runtime: SIGHUP reloads TLS certificate and private key.
+- Runtime: container image includes a `HEALTHCHECK` probing `/healthz`.
+- Database: migration 002 adds a status `CHECK` constraint and an optimized claim index.
+- Telemetry: outbox depth gauge reports 0 for idle bots.
+
+### Changed
+
+- Ingress: verifies bot existence and webhook secret in constant time before parsing the body.
+- Ingress: stores and forwards original raw bytes received from Telegram without re-serialization.
+- Ingress: checks duplicate updates before consuming token-bucket rate limit quota.
+- Ingress: rate limiter in-memory state is pruned hourly.
+- Downstream: 4xx responses (except 408, 425, 429) dead-letter immediately and do not trip the circuit breaker.
+- Downstream: HTTP client disables redirect following and enforces a 5s connect timeout; timeouts produce status 504.
+- Downstream: requeuing rows while the circuit breaker is open no longer increments attempt counters.
+- Downstream: recovery from process crashes retains existing retry backoff intervals.
+- Downstream: delivery error messages strip downstream and Telegram URLs to prevent credential leakage.
+- Lifecycle: graceful shutdown lets dispatchers finish in-flight delivery before stopping.
+- Lifecycle: unexpected dispatcher exit terminates the process with non-zero exit code for orchestrator restarts.
+- Lifecycle: webhook auto-registration retries on failure with exponential backoff.
+- Validation: enforced minimum 32 characters for `admin.token`.
+- Validation: enforced `[A-Za-z0-9_-]{1,64}` for bot IDs and `[A-Za-z0-9_-]{1,256}` for webhook secrets.
+- Validation: enforced HTTP/HTTPS schemes and valid hosts for downstream URLs and OTEL endpoint.
+- Validation: enforced HTTPS scheme and host for `public_url`.
+- Validation: enforced non-empty `bot_token` without whitespace, `/`, `?`, or `#`.
+- Validation: enforced `poll_interval_ms >= 1`, `delivered_retention_days` in `1..=36500`, and `max_cooldown_secs >= cooldown_secs`.
 ## [0.1.0] - 2026-10-13
 
 First release.
