@@ -1,5 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! The `telegateway` binary: loads the config, wires up routing,
+//! dispatchers, and telemetry, then serves until SIGTERM/SIGINT.
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;

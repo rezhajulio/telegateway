@@ -6,7 +6,7 @@ or `https://` when `[tls]` is configured.
 
 ## Webhook ingress
 
-`POST /webhooks/{bot_id}` — Telegram calls this; you can call it too when
+`POST /webhooks/{bot_id}`: Telegram calls this; you can call it too when
 testing. Authenticate with the bot's webhook secret:
 
 ```sh
@@ -25,7 +25,7 @@ curl -X POST localhost:8080/webhooks/echo-python \
 | `503`  | Outbox unavailable; Telegram retries. |
 
 Accepted updates are delivered to the downstream bot asynchronously with
-retries — the `200` means "durable", not "delivered". Forwarded requests
+retries. The `200` means "durable", not "delivered". Forwarded requests
 carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery
 is at-least-once: downstream bots dedupe on `update_id`.
 
@@ -48,7 +48,7 @@ token = "a-long-random-value"
 
 ### List outbox rows
 
-`GET /outbox` — newest first.
+`GET /outbox`: newest first.
 
 ```sh
 curl -H "Authorization: Bearer <token>" \
@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer <token>" \
 
 ### Replay an update
 
-`POST /outbox/replay` — re-deliver a past update to a bot's downstream,
+`POST /outbox/replay`: re-deliver a past update to a bot's downstream,
 synchronously, for debugging. The downstream sees the original
 `update_id`.
 

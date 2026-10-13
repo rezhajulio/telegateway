@@ -21,14 +21,14 @@ on every push and pull request. Keep all three green before pushing.
   envelope parsing, token-bucket behavior, config validation, breaker
   state transitions.
 - **Integration tests** live in `tests/`:
-  - `gateway.rs` — webhook ingress through the real router (via
+  - `gateway.rs`: webhook ingress through the real router (via
     `tower::ServiceExt::oneshot`), with a stub downstream bot.
-  - `outbox.rs` — dispatcher delivery, retries, backoff, dead letters,
+  - `outbox.rs`: dispatcher delivery, retries, backoff, dead letters,
     and breaker behavior against stub downstream servers.
-  - `register.rs` — `setWebhook` against a stub Telegram API.
-  - `otel.rs` — OTEL config parsing/validation, no-op init, init
+  - `register.rs`: `setWebhook` against a stub Telegram API.
+  - `otel.rs`: OTEL config parsing/validation, no-op init, init
     against a dead endpoint, `pending_counts`.
-  - `tls.rs` — HTTPS serving with a self-signed certificate.
+  - `tls.rs`: HTTPS serving with a self-signed certificate.
 
 ## Conventions
 
@@ -49,7 +49,7 @@ on every push and pull request. Keep all three green before pushing.
   must never panic.
 - **Config changes need a test compile check.** `Config` is constructed
   literally in some tests; adding a field without updating them fails
-  the build — that's intentional.
+  the build. That's intentional.
 
 ## Manual end-to-end checks
 

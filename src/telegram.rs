@@ -1,27 +1,46 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Telegram update envelopes: parsing the raw JSON into `update_id`,
+//! kind, and chat key for routing, rate limiting, and deduplication.
 use serde_json::Value;
 use thiserror::Error;
 
 /// The kind of a Telegram update, derived from which payload key is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateKind {
+    /// `message`
     Message,
+    /// `edited_message`
     EditedMessage,
+    /// `channel_post`
     ChannelPost,
+    /// `edited_channel_post`
     EditedChannelPost,
+    /// `business_message`
     BusinessMessage,
+    /// `callback_query`
     CallbackQuery,
+    /// `inline_query`
     InlineQuery,
+    /// `chosen_inline_result`
     ChosenInlineResult,
+    /// `shipping_query`
     ShippingQuery,
+    /// `pre_checkout_query`
     PreCheckoutQuery,
+    /// `poll`
     Poll,
+    /// `poll_answer`
     PollAnswer,
+    /// `my_chat_member`
     MyChatMember,
+    /// `chat_member`
     ChatMember,
+    /// `chat_join_request`
     ChatJoinRequest,
+    /// `message_reaction`
     MessageReaction,
+    /// Any other (or future) payload key.
     Other,
 }
 
@@ -29,11 +48,16 @@ pub enum UpdateKind {
 /// admission and routing decisions, without interpreting bot business logic.
 #[derive(Debug, Clone)]
 pub struct UpdateEnvelope {
+    /// Telegram's update id; the dedupe key.
     pub update_id: i64,
+    /// Which payload key the update carries.
     pub kind: UpdateKind,
+    /// Chat (or user) the rate limiter keys on; `None` when the update
+    /// has no chat context.
     pub chat_key: Option<i64>,
 }
 
+/// Rejection reason when the JSON is not a valid Telegram update.
 #[derive(Debug, Error)]
 #[error("invalid Telegram update: {0}")]
 pub struct EnvelopeError(pub String);

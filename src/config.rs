@@ -1,5 +1,6 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! TOML configuration: parsing, defaults, and validation.
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -17,7 +18,7 @@ pub struct Config {
     #[serde(default)]
     pub bots: Vec<BotConfig>,
     /// Public base URL Telegram uses to reach the gateway, e.g.
-    /// "https://gateway.example.com". Required when `auto_register` is true.
+    /// <https://gateway.example.com>. Required when `auto_register` is true.
     #[serde(default)]
     pub public_url: Option<String>,
     /// Register every bot's webhook with Telegram on startup.
@@ -165,6 +166,7 @@ fn default_max_cooldown_secs() -> u64 {
 /// Admin API settings. The token guards the `/outbox/*` routes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminConfig {
+    /// Bearer token checked against the `Authorization` header.
     pub token: String,
 }
 
@@ -183,12 +185,16 @@ fn default_otel_service_name() -> String {
     "telegateway".to_owned()
 }
 
+/// Everything that can go wrong while loading configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// The file could not be read.
     #[error("cannot read config file: {0}")]
     Io(#[from] std::io::Error),
+    /// The file is not valid TOML.
     #[error("cannot parse config file: {0}")]
     Parse(#[from] toml::de::Error),
+    /// The TOML parsed but the values don't make sense.
     #[error("invalid configuration: {0}")]
     Validation(String),
 }

@@ -1,5 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Router assembly: builds the axum router, shared state, and per-bot
+//! outbox dispatchers from the config.
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Context;
@@ -22,15 +24,23 @@ use crate::{
 /// Shared state injected into every handler.
 #[derive(Clone)]
 pub struct AppState {
+    /// Bot configs by id, for routing and forwarding.
     pub bots: Arc<Vec<BotConfig>>,
+    /// Per-chat rate limiters.
     pub policy: AdmissionPolicy,
+    /// Outbound HTTP client for downstream delivery.
     pub http: reqwest::Client,
+    /// The durable outbox.
     pub store: Store,
+    /// Wake signals for each bot's dispatcher, keyed by bot id.
     pub notifies: Arc<HashMap<String, Arc<Notify>>>,
+    /// Bearer token for the admin routes; `None` means they are not
+    /// registered.
     pub admin_token: Option<String>,
 }
 
 impl AppState {
+    /// Look up a bot's config by id.
     pub fn bot(&self, id: &str) -> Option<&BotConfig> {
         self.bots.iter().find(|b| b.id == id)
     }
@@ -39,8 +49,11 @@ impl AppState {
 /// Everything `build_router` produces: the router plus the background
 /// workers the caller must spawn.
 pub struct BuiltApp {
+    /// The axum router, ready to serve.
     pub router: Router,
+    /// One dispatcher per bot; spawn each with `Dispatcher::run`.
     pub dispatchers: Vec<Arc<Dispatcher>>,
+    /// The outbox store, shared with the dispatchers.
     pub store: Store,
 }
 

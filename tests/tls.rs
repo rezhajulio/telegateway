@@ -1,5 +1,6 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! HTTPS serving with a self-signed certificate.
 use std::net::SocketAddr;
 
 use telegateway::{app, config};

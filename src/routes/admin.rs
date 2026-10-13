@@ -17,12 +17,15 @@ use crate::{
     telegram,
 };
 
+/// Query parameters for the outbox listing.
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     /// One of `pending`, `in_flight`, `delivered`, `dead`, `all`.
     /// Defaults to `dead`.
     pub status: Option<String>,
+    /// Filter to one bot.
     pub bot_id: Option<String>,
+    /// Max rows, clamped to 1..=500. Defaults to 50.
     pub limit: Option<i64>,
 }
 
@@ -59,8 +62,10 @@ pub async fn list_outbox(
     }
 }
 
+/// Body of a replay request: either a stored update or an ad-hoc payload.
 #[derive(Debug, Deserialize)]
 pub struct ReplayRequest {
+    /// Which bot's downstream receives the replay.
     pub bot_id: String,
     /// Re-fire the newest stored payload for this update. Exactly one of
     /// `update_id` and `payload` is required.

@@ -1,5 +1,6 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Webhook self-registration against a stub Telegram API.
 use axum::{Json, Router, extract::Path, routing::post};
 use serde_json::Value;
 use telegateway::{

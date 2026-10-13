@@ -1,7 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! OpenTelemetry export: traces and metrics shipped via OTLP/HTTP to a
-//! collector. Entirely optional — without `[otel]` in the config, the
+//! collector. Entirely optional. Without `[otel]` in the config, the
 //! tracing layer is absent and every metric instrument is a no-op.
 //! Telemetry must never break the gateway: exporters are batched and
 //! async, and a dead collector only drops data.
@@ -35,13 +35,21 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// configured, otherwise from the global no-op meter.
 #[derive(Debug, Clone)]
 pub struct Metrics {
+    /// Updates accepted into the outbox.
     pub updates_accepted: Counter<u64>,
+    /// Updates delivered downstream.
     pub updates_delivered: Counter<u64>,
+    /// Delivery attempts that failed.
     pub updates_failed: Counter<u64>,
+    /// Updates that exhausted retries.
     pub updates_dead_lettered: Counter<u64>,
+    /// Admin replay deliveries.
     pub updates_replayed: Counter<u64>,
+    /// Downstream delivery latency, in milliseconds.
     pub delivery_latency_ms: Histogram<f64>,
+    /// Pending outbox rows per bot.
     pub outbox_pending: Gauge<u64>,
+    /// Breaker state per bot: 0 closed, 1 open, 2 half-open.
     pub breaker_state: Gauge<i64>,
 }
 
@@ -95,6 +103,7 @@ pub fn metrics() -> &'static Metrics {
     METRICS.get_or_init(Metrics::noop)
 }
 
+/// The attribute set every metric carries: the bot the measurement is for.
 pub fn bot_attrs(bot_id: &str) -> [KeyValue; 1] {
     [KeyValue::new("bot_id", bot_id.to_owned())]
 }
@@ -113,6 +122,8 @@ pub struct Otel {
 }
 
 impl Otel {
+    /// Move the tracing layer out for the subscriber builder. `None`
+    /// when `[otel]` is absent.
     pub fn take_tracing_layer(&mut self) -> Option<OtelTracingLayer> {
         self.layer.take()
     }

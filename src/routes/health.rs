@@ -1,5 +1,6 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Liveness and readiness probes.
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::app::AppState;

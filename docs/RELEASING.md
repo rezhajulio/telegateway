@@ -10,8 +10,7 @@ This repo follows [Conventional Commits](https://www.conventionalcommits.org/):
 `feat:`, `fix:`, `docs:`, `ci:`, `test:`, `refactor:`, `chore:`.
 Write the subject in imperative mood, keep it under 72 characters, and
 put the why in the body when it isn't obvious from the subject. The
-history was converted to this format in October 2026; keep it that way —
-a future changelog generator will read these prefixes.
+history was converted to this format in October 2026; keep it that way so a future changelog generator can read these prefixes.
 
 ## One-time setup
 
@@ -29,7 +28,7 @@ stops before the GitHub Release is created.
 ## Cutting a release
 
 1. Bump `version` in `Cargo.toml` (follow semver; every release needs a
-   new version — crates.io versions are immutable).
+   new version; crates.io versions are immutable).
 2. Update `CHANGELOG.md` if there is something worth noting. (There is
    no changelog file yet; releases so far are described by the GitHub
    Release notes.)

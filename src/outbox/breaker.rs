@@ -13,7 +13,10 @@ pub enum Decision {
     /// Deliver normally.
     Allow,
     /// The breaker is open; try again after this delay.
-    Deny { retry_after: Duration },
+    Deny {
+        /// How long to wait before the next attempt.
+        retry_after: Duration,
+    },
     /// The cooldown elapsed; one trial delivery is allowed.
     Probe,
 }
@@ -28,6 +31,8 @@ enum State {
     },
 }
 
+/// Per-bot circuit breaker: trips after consecutive delivery failures,
+/// fast-fails while open, and lets one probe through per cooldown.
 pub struct CircuitBreaker {
     bot_id: String,
     failure_threshold: u32,
@@ -37,6 +42,8 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
+    /// Create a closed breaker. A threshold below 1 is treated as 1, and
+    /// a max cooldown below the base cooldown is raised to it.
     pub fn new(
         bot_id: String,
         failure_threshold: u32,
@@ -54,6 +61,7 @@ impl CircuitBreaker {
         }
     }
 
+    /// Decide whether a delivery may proceed at `now`.
     pub fn decide(&self, now: Instant) -> Decision {
         match &self.state {
             State::Closed { .. } => Decision::Allow,

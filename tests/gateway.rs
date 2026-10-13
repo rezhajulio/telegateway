@@ -1,5 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Webhook ingress: routing, secret validation, rate limiting, and
+//! outbox persistence, through the real router.
 use axum::{
     body::Body,
     http::{Request, StatusCode},

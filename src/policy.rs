@@ -1,5 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Per-chat admission policy: token-bucket rate limiting keyed by bot
+//! and chat.
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ pub struct AdmissionPolicy {
 }
 
 impl AdmissionPolicy {
+    /// Build the per-bot limiters from config. A quota of 0 is treated
+    /// as 1; unknown bots are never admitted.
     pub fn new(bots: &[BotConfig]) -> Self {
         let mut limiters = HashMap::with_capacity(bots.len());
         for bot in bots {

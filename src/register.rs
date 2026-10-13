@@ -13,10 +13,13 @@ use crate::config::{BotConfig, Config};
 /// point it at a stub server.
 pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
+/// Everything that can go wrong while registering a webhook.
 #[derive(Debug, Error)]
 pub enum RegisterError {
+    /// The HTTP request itself failed.
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+    /// Telegram answered, but with `ok: false`.
     #[error("telegram refused: {0}")]
     Refused(String),
 }

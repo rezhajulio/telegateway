@@ -14,29 +14,43 @@ use super::{backoff_delay, now_millis};
 /// A queued update claimed for delivery.
 #[derive(Debug)]
 pub struct OutboxRow {
+    /// Database row id.
     pub id: i64,
+    /// Which bot this update is for.
     pub bot_id: String,
+    /// Telegram's update id; dedupe key together with `bot_id`.
     pub update_id: i64,
+    /// The raw JSON body Telegram sent.
     pub payload: String,
+    /// Delivery attempts so far.
     pub attempts: i64,
 }
 
 /// One row in the outbox listing.
 #[derive(Debug, serde::Serialize)]
 pub struct OutboxEntry {
+    /// Database row id.
     pub id: i64,
+    /// Which bot this update is for.
     pub bot_id: String,
+    /// Telegram's update id.
     pub update_id: i64,
+    /// pending, in_flight, delivered, or dead.
     pub status: String,
+    /// Delivery attempts so far.
     pub attempts: i64,
+    /// Unix millis of the next scheduled attempt, if any.
     pub next_attempt_at: Option<i64>,
+    /// Last delivery error, if any.
     pub last_error: Option<String>,
+    /// Unix millis when the update was accepted.
     pub created_at: i64,
 }
 
 /// Statuses accepted by the list filter.
 pub const OUTBOX_STATUSES: &[&str] = &["pending", "in_flight", "delivered", "dead"];
 
+/// SQLite-backed outbox storage. Clone is cheap: clones share the pool.
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -80,7 +94,7 @@ impl Store {
     }
 
     /// Insert an accepted update. Returns `false` when the
-    /// `(bot_id, update_id)` pair is already queued — a Telegram redelivery.
+    /// `(bot_id, update_id)` pair is already queued: a Telegram redelivery.
     pub async fn insert(
         &self,
         bot_id: &str,
@@ -129,6 +143,7 @@ impl Store {
             .collect())
     }
 
+    /// Mark a claimed row delivered.
     pub async fn mark_delivered(&self, id: i64) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE outbox SET status = 'delivered' WHERE id = ?")
             .bind(id)

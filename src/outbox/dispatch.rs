@@ -45,7 +45,8 @@ pub async fn deliver_payload(
     }
 }
 
-/// Per-bot delivery task.
+/// Per-bot delivery task: drains due outbox rows while the circuit
+/// breaker allows it, backs off on failure, and probes for recovery.
 pub struct Dispatcher {
     store: Store,
     http: reqwest::Client,
@@ -57,6 +58,8 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    /// Build a dispatcher. `notify` wakes the delivery loop when new
+    /// updates are accepted.
     pub fn new(
         store: Store,
         http: reqwest::Client,

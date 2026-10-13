@@ -1,5 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//! Webhook ingress: validate the secret, rate-limit per chat, persist to
+//! the outbox, and answer Telegram.
 use axum::{
     Json,
     extract::{Path, State},
