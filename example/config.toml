@@ -1,0 +1,22 @@
+# Example gateway config: three echo bots, one telegateway.
+# Start the bots first (see example/README.md), then:
+#   telegateway --config example/config.toml
+listen = "127.0.0.1:8080"
+
+[[bots]]
+id = "echo-python"
+downstream_url = "http://127.0.0.1:8081/webhook"
+webhook_secret = "python-secret"
+rate_limit_per_minute = 30
+
+[[bots]]
+id = "echo-go"
+downstream_url = "http://127.0.0.1:8082/webhook"
+webhook_secret = "go-secret"
+rate_limit_per_minute = 30
+
+[[bots]]
+id = "echo-rust"
+downstream_url = "http://127.0.0.1:8083/webhook"
+webhook_secret = "rust-secret"
+rate_limit_per_minute = 30
