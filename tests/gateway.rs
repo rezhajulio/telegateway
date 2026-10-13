@@ -253,54 +253,267 @@ async fn downstream_outage_is_accepted_for_retry() {
     assert_eq!(built.store.status_of("demo", 1).await.unwrap(), "pending");
 }
 
+fn admin_get(path: &str, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method("GET").uri(path);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+fn admin_post(path: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+async fn read_json(router: axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, value)
+}
+
 #[tokio::test]
-async fn dead_letters_require_admin_token() {
+async fn outbox_list_needs_admin_token() {
     let (downstream, _rx) = stub_downstream().await;
     let built = app::build_router(test_config_full(downstream, 30, true))
         .await
         .unwrap();
 
-    let get = |token: Option<&str>| {
-        let mut builder = Request::builder().method("GET").uri("/outbox/dead");
-        if let Some(token) = token {
-            builder = builder.header("authorization", format!("Bearer {token}"));
-        }
-        builder.body(Body::empty()).unwrap()
-    };
-
-    let no_token = built.router.clone().oneshot(get(None)).await.unwrap();
+    let no_token = built
+        .router
+        .clone()
+        .oneshot(admin_get("/outbox", None))
+        .await
+        .unwrap();
     assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
 
     let wrong = built
         .router
         .clone()
-        .oneshot(get(Some("wrong")))
+        .oneshot(admin_get("/outbox", Some("wrong")))
         .await
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
-
-    let ok = built.router.oneshot(get(Some(ADMIN_SECRET))).await.unwrap();
-    assert_eq!(ok.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn dead_letters_route_missing_without_admin() {
+async fn outbox_list_filters_and_validates() {
+    let (downstream, _rx) = stub_downstream().await;
+    let built = app::build_router(test_config_full(downstream, 30, true))
+        .await
+        .unwrap();
+
+    // Seed one pending row via the webhook.
+    let resp = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(11, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Default status is dead: nothing there.
+    let (status, rows) = read_json(
+        built.router.clone(),
+        admin_get("/outbox", Some(ADMIN_SECRET)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows, json!([]));
+
+    let (status, rows) = read_json(
+        built.router.clone(),
+        admin_get("/outbox?status=pending&bot_id=demo", Some(ADMIN_SECRET)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["update_id"], 11);
+    assert_eq!(rows[0]["status"], "pending");
+
+    let resp = built
+        .router
+        .oneshot(admin_get("/outbox?status=bogus", Some(ADMIN_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_routes_missing_without_token_config() {
     let (downstream, _rx) = stub_downstream().await;
     let built = app::build_router(test_config(downstream, 30))
         .await
         .unwrap();
 
-    let resp = built
-        .router
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/outbox/dead")
-                .header("authorization", format!("Bearer {ADMIN_SECRET}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+    for req in [
+        admin_get("/outbox", Some(ADMIN_SECRET)),
+        admin_post(
+            "/outbox/replay",
+            Some(ADMIN_SECRET),
+            json!({"bot_id": "demo", "update_id": 1}),
+        ),
+    ] {
+        let resp = built.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn replay_delivers_stored_update() {
+    let (downstream, mut rx) = stub_downstream().await;
+    let built = app::build_router(test_config_full(downstream, 30, true))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(21, 7)))
+        .await
+        .unwrap();
+
+    let (status, replayed) = read_json(
+        built.router,
+        admin_post(
+            "/outbox/replay",
+            Some(ADMIN_SECRET),
+            json!({"bot_id": "demo", "update_id": 21}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed["ok"], true);
+    assert_eq!(replayed["update_id"], 21);
+    assert_eq!(replayed["downstream_status"], 200);
+
+    let forwarded = rx.recv().await.expect("downstream should be called");
+    let body: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    assert_eq!(body["update_id"], 21);
+}
+
+#[tokio::test]
+async fn replay_accepts_adhoc_payload() {
+    let (downstream, mut rx) = stub_downstream().await;
+    let built = app::build_router(test_config_full(downstream, 30, true))
+        .await
+        .unwrap();
+
+    let (status, _) = read_json(
+        built.router,
+        admin_post(
+            "/outbox/replay",
+            Some(ADMIN_SECRET),
+            json!({"bot_id": "demo", "payload": update(22, 7)}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let forwarded = rx.recv().await.expect("downstream should be called");
+    let body: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    assert_eq!(body["update_id"], 22);
+}
+
+#[tokio::test]
+async fn replay_rejects_bad_requests() {
+    let (downstream, _rx) = stub_downstream().await;
+    let built = app::build_router(test_config_full(downstream, 30, true))
+        .await
+        .unwrap();
+
+    let post = async |body: serde_json::Value, token: Option<&str>| {
+        built
+            .router
+            .clone()
+            .oneshot(admin_post("/outbox/replay", token, body))
+            .await
+            .unwrap()
+            .status()
+    };
+
+    // Unknown stored update.
+    assert_eq!(
+        post(
+            json!({"bot_id": "demo", "update_id": 999}),
+            Some(ADMIN_SECRET)
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    // Unknown bot.
+    assert_eq!(
+        post(
+            json!({"bot_id": "nope", "update_id": 1}),
+            Some(ADMIN_SECRET)
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    // Both identifiers.
+    assert_eq!(
+        post(
+            json!({"bot_id": "demo", "update_id": 1, "payload": update(1, 7)}),
+            Some(ADMIN_SECRET)
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    // Neither identifier.
+    assert_eq!(
+        post(json!({"bot_id": "demo"}), Some(ADMIN_SECRET)).await,
+        StatusCode::BAD_REQUEST
+    );
+    // Payload without update_id.
+    assert_eq!(
+        post(
+            json!({"bot_id": "demo", "payload": {"nope": true}}),
+            Some(ADMIN_SECRET)
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    // Bad token.
+    assert_eq!(
+        post(json!({"bot_id": "demo", "update_id": 1}), Some("wrong")).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn replay_surfaces_downstream_failure() {
+    // Nothing listens on this port.
+    let built = app::build_router(test_config_full(
+        "http://127.0.0.1:1/webhook".to_owned(),
+        30,
+        true,
+    ))
+    .await
+    .unwrap();
+
+    let (status, replayed) = read_json(
+        built.router,
+        admin_post(
+            "/outbox/replay",
+            Some(ADMIN_SECRET),
+            json!({"bot_id": "demo", "payload": update(23, 7)}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(replayed["ok"], false);
+    assert!(replayed["error"].is_string());
 }

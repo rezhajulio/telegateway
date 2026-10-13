@@ -129,13 +129,13 @@ async fn failed_attempts_back_off_then_dead_letter() {
     );
     assert_eq!(store.status_of("demo", 1).await.unwrap(), "dead");
 
-    let dead = store.list_dead(None).await.unwrap();
+    let dead = store.list("dead", None, 50).await.unwrap();
     assert_eq!(dead.len(), 1);
     assert_eq!(dead[0].update_id, 1);
     assert_eq!(dead[0].attempts, 2);
     assert_eq!(dead[0].last_error.as_deref(), Some("boom again"));
 
-    let filtered = store.list_dead(Some("other")).await.unwrap();
+    let filtered = store.list("dead", Some("other"), 50).await.unwrap();
     assert!(filtered.is_empty());
 }
 
@@ -162,6 +162,51 @@ async fn in_flight_rows_are_requeued_on_open() {
     let rows = store.claim_due("demo", 32).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].attempts, 2, "attempt counter survives the crash");
+}
+
+#[tokio::test]
+async fn list_filters_by_status_bot_and_limit() {
+    let store = Store::open(&temp_db()).await.unwrap();
+    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 2, "{}").await.unwrap();
+    store.insert("other", 3, "{}").await.unwrap();
+    let rows = store.claim_due("demo", 32).await.unwrap();
+    store.mark_delivered(rows[0].id).await.unwrap();
+    store.mark_failed(rows[1].id, "x", 1).await.unwrap();
+
+    assert_eq!(store.list("all", None, 50).await.unwrap().len(), 3);
+    assert_eq!(store.list("pending", None, 50).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .list("delivered", Some("demo"), 50)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.list("dead", Some("demo"), 50).await.unwrap().len(), 1);
+    assert_eq!(
+        store.list("dead", Some("other"), 50).await.unwrap().len(),
+        0
+    );
+    assert_eq!(store.list("all", None, 2).await.unwrap().len(), 2);
+    let all = store.list("all", None, 50).await.unwrap();
+    assert_eq!(all[0].update_id, 3, "newest first");
+    assert_eq!(all[0].status, "pending");
+}
+
+#[tokio::test]
+async fn find_payload_returns_newest_stored_body() {
+    let store = Store::open(&temp_db()).await.unwrap();
+    assert_eq!(store.find_payload("demo", 9).await.unwrap(), None);
+    store
+        .insert("demo", 9, r#"{"update_id":9,"n":1}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.find_payload("demo", 9).await.unwrap().as_deref(),
+        Some(r#"{"update_id":9,"n":1}"#)
+    );
 }
 
 #[tokio::test]
@@ -228,7 +273,7 @@ async fn dispatcher_dead_letters_after_max_attempts() {
     d.drain_once().await;
 
     assert_eq!(store.status_of("demo", 7).await.unwrap(), "dead");
-    let dead = store.list_dead(Some("demo")).await.unwrap();
+    let dead = store.list("dead", Some("demo"), 50).await.unwrap();
     assert_eq!(dead.len(), 1);
     assert!(dead[0].last_error.as_deref().unwrap().contains("500"));
 }

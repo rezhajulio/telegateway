@@ -80,17 +80,9 @@ delivery is at-least-once).
 
 ### Dead letters
 
-Updates that exhaust their retries land in the dead-letter trail. With an
-`[admin]` token configured, list them:
-
-```sh
-curl -H "Authorization: Bearer <admin token>" \
-  localhost:8080/outbox/dead
-# [{"bot_id":"demo","update_id":7,"attempts":25,"last_error":"...","created_at":...}]
-```
-
-Add `?bot_id=demo` to filter. The route is not registered at all without
-`[admin]`.
+Updates that exhaust their retries land in the dead-letter trail, listed
+via the admin API. See [docs/API.md](docs/API.md) for the full API
+reference: webhook ingress, probes, outbox listing, and replay.
 
 ## Configuration
 

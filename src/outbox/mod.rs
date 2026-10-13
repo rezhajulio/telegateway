@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub mod dispatch;
 mod store;
 
-pub use dispatch::Dispatcher;
-pub use store::{DeadLetter, OutboxRow, Store};
+pub use dispatch::{Dispatcher, deliver_payload};
+pub use store::{OUTBOX_STATUSES, OutboxEntry, OutboxRow, Store};
 
 /// Exponential backoff with jitter for a 1-based attempt number:
 /// 5s, 10s, 20s, ... capped at 1h, plus or minus 20%.

@@ -82,7 +82,9 @@ pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
         .route("/readyz", get(routes::health::readyz))
         .route("/webhooks/{bot_id}", post(routes::webhook::webhook_handler));
     if state.admin_token.is_some() {
-        router = router.route("/outbox/dead", get(routes::admin::dead_letters));
+        router = router
+            .route("/outbox", get(routes::admin::list_outbox))
+            .route("/outbox/replay", post(routes::admin::replay));
     }
     let router = router
         .layer(TraceLayer::new_for_http())

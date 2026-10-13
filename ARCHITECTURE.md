@@ -94,7 +94,7 @@ Response contract with Telegram:
 | `app`             | Router assembly, shared `AppState`, middleware stack.                 |
 | `routes::health`  | `/healthz` (liveness) and `/readyz` (readiness, checks the outbox).   |
 | `routes::webhook` | The ingress handler: authenticate → adapt → admit → persist → log.    |
-| `routes::admin`   | `/outbox/dead`: dead-letter listing, bearer-token guarded.            |
+| `routes::admin`   | `/outbox` listing and `/outbox/replay`, bearer-token guarded.          |
 | `outbox::store`   | SQLite persistence: insert, atomic claim, retry bookkeeping, prune.    |
 | `outbox::dispatch`| Per-bot delivery tasks with exponential-backoff retries; janitor.     |
 | `telegram`        | Adapter: raw Telegram JSON → routing envelope.                        |
@@ -206,6 +206,5 @@ by design: replicating the gateway would need shared outbox storage.
 
 ## 12. Roadmap
 
-1. **Replay API** — re-deliver a recorded update to a bot for debugging.
-2. **OpenTelemetry export** — traces and metrics to a collector.
-3. **Circuit breaker** — per-bot open/half-open/closed state with fast-fail.
+1. **OpenTelemetry export** — traces and metrics to a collector.
+2. **Circuit breaker** — per-bot open/half-open/closed state with fast-fail.

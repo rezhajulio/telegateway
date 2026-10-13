@@ -15,21 +15,27 @@ use super::{OutboxRow, Store, now_millis};
 /// How many rows one drain pass claims at most.
 const CLAIM_LIMIT: i64 = 32;
 
-/// Forward one queued update to the downstream bot.
-async fn deliver(http: &reqwest::Client, bot: &BotConfig, row: &OutboxRow) -> Result<(), String> {
+/// Forward one payload to the downstream bot. Shared by the dispatcher
+/// and the replay API.
+pub async fn deliver_payload(
+    http: &reqwest::Client,
+    bot: &BotConfig,
+    update_id: i64,
+    payload: &str,
+) -> Result<axum::http::StatusCode, String> {
     let resp = http
         .post(&bot.downstream_url)
         .timeout(Duration::from_secs(25))
         .header("content-type", "application/json")
         .header("x-telegateway-bot", &bot.id)
-        .header("x-telegateway-update-id", row.update_id.to_string())
-        .body(row.payload.clone())
+        .header("x-telegateway-update-id", update_id.to_string())
+        .body(payload.to_owned())
         .send()
         .await
         .map_err(|e| e.to_string())?;
     let status = resp.status();
     if status.is_success() {
-        Ok(())
+        Ok(status)
     } else {
         Err(format!("downstream answered {status}"))
     }
@@ -89,8 +95,8 @@ impl Dispatcher {
 
     async fn deliver_row(&self, row: &OutboxRow) {
         let started = Instant::now();
-        match deliver(&self.http, &self.bot, row).await {
-            Ok(()) => {
+        match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
+            Ok(_) => {
                 if let Err(e) = self.store.mark_delivered(row.id).await {
                     tracing::error!(
                         bot_id = %self.bot.id,

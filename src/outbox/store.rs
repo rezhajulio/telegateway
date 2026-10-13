@@ -21,15 +21,21 @@ pub struct OutboxRow {
     pub attempts: i64,
 }
 
-/// An update that exhausted its retries.
+/// One row in the outbox listing.
 #[derive(Debug, serde::Serialize)]
-pub struct DeadLetter {
+pub struct OutboxEntry {
+    pub id: i64,
     pub bot_id: String,
     pub update_id: i64,
+    pub status: String,
     pub attempts: i64,
+    pub next_attempt_at: Option<i64>,
     pub last_error: Option<String>,
     pub created_at: i64,
 }
+
+/// Statuses accepted by the list filter.
+pub const OUTBOX_STATUSES: &[&str] = &["pending", "in_flight", "delivered", "dead"];
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -167,39 +173,67 @@ impl Store {
         }
     }
 
-    /// Dead letters, newest first, optionally for one bot.
-    pub async fn list_dead(&self, bot_id: Option<&str>) -> Result<Vec<DeadLetter>, sqlx::Error> {
-        let rows = match bot_id {
-            Some(bot) => {
-                sqlx::query(
-                    "SELECT bot_id, update_id, attempts, last_error, created_at
-                     FROM outbox WHERE status = 'dead' AND bot_id = ?
-                     ORDER BY id DESC",
-                )
-                .bind(bot)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT bot_id, update_id, attempts, last_error, created_at
-                     FROM outbox WHERE status = 'dead'
-                     ORDER BY id DESC",
-                )
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+    /// Outbox rows, newest first. `status` is one of `pending`,
+    /// `in_flight`, `delivered`, `dead`, or `all`. Optionally filtered by
+    /// bot and capped at `limit` rows.
+    pub async fn list(
+        &self,
+        status: &str,
+        bot_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<OutboxEntry>, sqlx::Error> {
+        let mut sql = String::from(
+            "SELECT id, bot_id, update_id, status, attempts, next_attempt_at, last_error, created_at
+             FROM outbox WHERE 1 = 1",
+        );
+        if status != "all" {
+            sql.push_str(" AND status = ?");
+        }
+        if bot_id.is_some() {
+            sql.push_str(" AND bot_id = ?");
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+
+        let mut query = sqlx::query(&sql);
+        if status != "all" {
+            query = query.bind(status);
+        }
+        if let Some(bot) = bot_id {
+            query = query.bind(bot);
+        }
+        let rows = query.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
-            .map(|r| DeadLetter {
+            .map(|r| OutboxEntry {
+                id: r.get("id"),
                 bot_id: r.get("bot_id"),
                 update_id: r.get("update_id"),
+                status: r.get("status"),
                 attempts: r.get("attempts"),
+                next_attempt_at: r.get("next_attempt_at"),
                 last_error: r.get("last_error"),
                 created_at: r.get("created_at"),
             })
             .collect())
+    }
+
+    /// Newest stored payload for a `(bot_id, update_id)` pair, whatever its
+    /// status. Used by the replay API.
+    pub async fn find_payload(
+        &self,
+        bot_id: &str,
+        update_id: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT payload FROM outbox
+             WHERE bot_id = ? AND update_id = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(bot_id)
+        .bind(update_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get("payload")))
     }
 
     /// Drop delivered rows older than `delivered_cutoff` and dead rows older
