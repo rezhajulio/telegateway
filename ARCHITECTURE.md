@@ -193,6 +193,14 @@ and never stop the gateway; bots without a token are skipped.
 - Rejections log the reason (`bad webhook secret`, `rate limited`, …) at
   `WARN`.
 - `/healthz` and `/readyz` are scrape-friendly probes for orchestrators.
+- OpenTelemetry (optional, via `[otel]`): traces and metrics exported over
+  OTLP/HTTP to a collector. Spans cover ingress, delivery, breaker probes,
+  replays, and webhook registration; metrics are per-bot counters (accepted,
+  delivered, failed, dead-lettered, replayed), delivery latency, pending
+  outbox depth, and breaker state (0 closed / 1 open / 2 half-open).
+  Downstream requests carry W3C `traceparent` headers. Export is batched and
+  async — a dead collector only drops telemetry, never requests. SIGTERM /
+  SIGINT trigger graceful shutdown with provider flush.
 
 ## 10. Failure handling
 
@@ -214,7 +222,3 @@ terminates TLS itself from the `[tls]` config section. The gateway keeps
 local state in the outbox SQLite file (bind-mounted or on a volume in
 containers); rate-limiter state is in-memory and safe to lose. Single-node
 by design: replicating the gateway would need shared outbox storage.
-
-## 12. Roadmap
-
-1. **OpenTelemetry export** — traces and metrics to a collector.

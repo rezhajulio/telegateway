@@ -23,6 +23,9 @@ clap = { version = "4", features = ["derive"] }
 constant_time_eq = "0.3"
 fastrand = "2"
 governor = { version = "0.10", features = ["dashmap"] }
+opentelemetry = { version = "0.28", features = ["metrics", "trace"] }
+opentelemetry-otlp = { version = "0.28", features = ["http-proto", "metrics", "trace"] }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "metrics", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +38,7 @@ toml = "0.8"
 tower = { version = "0.5", features = ["util", "limit", "timeout"] }
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 tracing = "0.1"
+tracing-opentelemetry = "0.29"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]

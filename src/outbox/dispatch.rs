@@ -24,9 +24,12 @@ pub async fn deliver_payload(
     update_id: i64,
     payload: &str,
 ) -> Result<axum::http::StatusCode, String> {
+    let mut trace_headers = reqwest::header::HeaderMap::new();
+    crate::otel::inject_trace_context(&mut trace_headers);
     let resp = http
         .post(&bot.downstream_url)
         .timeout(Duration::from_secs(25))
+        .headers(trace_headers)
         .header("content-type", "application/json")
         .header("x-telegateway-bot", &bot.id)
         .header("x-telegateway-update-id", update_id.to_string())
@@ -120,14 +123,37 @@ impl Dispatcher {
         done
     }
 
+    fn record_breaker_state(&self) {
+        let value = self
+            .breaker
+            .lock()
+            .expect("breaker mutex poisoned")
+            .gauge_value(Instant::now());
+        crate::otel::metrics()
+            .breaker_state
+            .record(value, &crate::otel::bot_attrs(&self.bot.id));
+    }
+
+    #[tracing::instrument(
+        name = "outbox.deliver",
+        skip(self, row),
+        fields(bot_id = %self.bot.id, update_id = row.update_id)
+    )]
     async fn deliver_row(&self, row: &OutboxRow) {
         let started = Instant::now();
+        let metrics = crate::otel::metrics();
+        let attrs = crate::otel::bot_attrs(&self.bot.id);
         match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
             Ok(_) => {
                 self.breaker
                     .lock()
                     .expect("breaker mutex poisoned")
                     .on_success();
+                self.record_breaker_state();
+                metrics.updates_delivered.add(1, &attrs);
+                metrics
+                    .delivery_latency_ms
+                    .record(started.elapsed().as_millis() as f64, &attrs);
                 if let Err(e) = self.store.mark_delivered(row.id).await {
                     tracing::error!(
                         bot_id = %self.bot.id,
@@ -148,6 +174,8 @@ impl Dispatcher {
                     .lock()
                     .expect("breaker mutex poisoned")
                     .on_failure(Instant::now());
+                self.record_breaker_state();
+                metrics.updates_failed.add(1, &attrs);
                 match self
                     .store
                     .mark_failed(row.id, &error, self.max_attempts)
@@ -161,13 +189,16 @@ impl Dispatcher {
                         error = %error,
                         "delivery failed, retrying"
                     ),
-                    Ok(None) => tracing::warn!(
-                        bot_id = %self.bot.id,
-                        update_id = row.update_id,
-                        attempts = row.attempts,
-                        error = %error,
-                        "delivery failed, dead-lettered"
-                    ),
+                    Ok(None) => {
+                        metrics.updates_dead_lettered.add(1, &attrs);
+                        tracing::warn!(
+                            bot_id = %self.bot.id,
+                            update_id = row.update_id,
+                            attempts = row.attempts,
+                            error = %error,
+                            "delivery failed, dead-lettered"
+                        );
+                    }
                     Err(e) => tracing::error!(
                         bot_id = %self.bot.id,
                         update_id = row.update_id,
@@ -182,6 +213,7 @@ impl Dispatcher {
     /// Send one probe delivery while half-open. On success the breaker
     /// closes and the bot's pending rows are woken for immediate drain;
     /// on failure the breaker reopens with a doubled cooldown.
+    #[tracing::instrument(name = "outbox.probe", skip(self), fields(bot_id = %self.bot.id))]
     pub async fn probe(&self) {
         let rows = match self.store.claim_due(&self.bot.id, 1).await {
             Ok(rows) => rows,
@@ -198,12 +230,16 @@ impl Dispatcher {
             update_id = row.update_id,
             "circuit breaker probe"
         );
+        let metrics = crate::otel::metrics();
+        let attrs = crate::otel::bot_attrs(&self.bot.id);
         match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
             Ok(_) => {
                 self.breaker
                     .lock()
                     .expect("breaker mutex poisoned")
                     .on_success();
+                self.record_breaker_state();
+                metrics.updates_delivered.add(1, &attrs);
                 if let Err(e) = self.store.mark_delivered(row.id).await {
                     tracing::error!(
                         bot_id = %self.bot.id,
@@ -226,6 +262,8 @@ impl Dispatcher {
                     .lock()
                     .expect("breaker mutex poisoned")
                     .on_failure(Instant::now());
+                self.record_breaker_state();
+                metrics.updates_failed.add(1, &attrs);
                 if let Err(e) = self
                     .store
                     .mark_failed(row.id, &error, self.max_attempts)

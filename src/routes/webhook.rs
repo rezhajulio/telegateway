@@ -24,6 +24,11 @@ const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
 /// - `503` when the outbox is unavailable, so Telegram retries the delivery
 ///   later. A downed downstream bot no longer surfaces here: the dispatcher
 ///   retries delivery in the background.
+#[tracing::instrument(
+    name = "webhook.ingress",
+    skip(state, headers, body),
+    fields(bot_id = tracing::field::Empty, update_id = tracing::field::Empty)
+)]
 pub async fn webhook_handler(
     State(state): State<AppState>,
     Path(bot_id): Path<String>,
@@ -66,13 +71,20 @@ pub async fn webhook_handler(
         .insert(&bot_id, envelope.update_id, &body.to_string())
         .await
     {
-        Ok(true) => tracing::info!(
-            bot_id = %bot_id,
-            update_id = envelope.update_id,
-            kind = ?envelope.kind,
-            chat_key = ?envelope.chat_key,
-            "update accepted"
-        ),
+        Ok(true) => {
+            crate::otel::metrics()
+                .updates_accepted
+                .add(1, &crate::otel::bot_attrs(&bot_id));
+            tracing::Span::current().record("bot_id", bot_id.as_str());
+            tracing::Span::current().record("update_id", envelope.update_id);
+            tracing::info!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                kind = ?envelope.kind,
+                chat_key = ?envelope.chat_key,
+                "update accepted"
+            );
+        }
         Ok(false) => tracing::debug!(
             bot_id = %bot_id,
             update_id = envelope.update_id,

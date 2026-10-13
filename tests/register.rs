@@ -81,6 +81,7 @@ async fn register_all_skips_bots_without_token() {
         outbox: Default::default(),
         circuit_breaker: Default::default(),
         admin: None,
+        otel: None,
     };
 
     register_all(&config, &base).await;

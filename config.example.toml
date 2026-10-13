@@ -15,10 +15,17 @@ listen = "127.0.0.1:8080"
 # cooldown_secs = 60
 # max_cooldown_secs = 600
 
-# Admin API: guards GET /outbox/dead (dead-letter listing). The route is
-# not registered without this section.
+# Admin API: guards the /outbox listing and /outbox/replay routes.
+# The routes are not registered without this section.
 # [admin]
 # token = "change-me-to-a-long-random-value"
+
+# OpenTelemetry: export traces and metrics via OTLP/HTTP to a collector.
+# Without this section, nothing leaves the process. A dead collector only
+# drops telemetry; it never breaks the gateway.
+# [otel]
+# endpoint = "http://localhost:4318"
+# service_name = "telegateway"
 
 # Optional: register webhooks with Telegram on startup instead of calling
 # setWebhook by hand. Requires `public_url` and a `bot_token` per bot.

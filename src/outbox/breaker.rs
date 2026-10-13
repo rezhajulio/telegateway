@@ -72,6 +72,16 @@ impl CircuitBreaker {
         }
     }
 
+    /// Numeric state for the `telegateway.breaker.state` gauge:
+    /// 0 closed, 1 open, 2 half-open (cooldown elapsed, probe due).
+    pub fn gauge_value(&self, now: Instant) -> i64 {
+        match self.decide(now) {
+            Decision::Allow => 0,
+            Decision::Deny { .. } => 1,
+            Decision::Probe => 2,
+        }
+    }
+
     /// A delivery succeeded: close the breaker and reset the counter.
     pub fn on_success(&mut self) {
         if matches!(self.state, State::Open { .. }) {
@@ -140,6 +150,24 @@ mod tests {
     fn starts_closed() {
         let b = breaker();
         assert_eq!(b.decide(Instant::now()), Decision::Allow);
+    }
+
+    #[test]
+    fn gauge_reports_state_transitions() {
+        let mut b = breaker();
+        let now = Instant::now();
+        assert_eq!(b.gauge_value(now), 0, "closed");
+        b.on_failure(now);
+        b.on_failure(now);
+        b.on_failure(now);
+        assert_eq!(b.gauge_value(now), 1, "open");
+        assert_eq!(
+            b.gauge_value(now + Duration::from_millis(500)),
+            2,
+            "half-open once the cooldown elapsed"
+        );
+        b.on_success();
+        assert_eq!(b.gauge_value(now), 0, "closed again");
     }
 
     #[test]

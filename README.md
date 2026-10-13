@@ -116,12 +116,33 @@ rate_limit_per_minute = 30
 | `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`). |
 | `circuit_breaker.max_cooldown_secs` | Cap for the doubling cooldown (default `600`). |
 | `admin.token`                | Bearer token for `/outbox/*`. Route absent when unset.       |
+| `otel.endpoint`              | OTLP/HTTP collector base URL for traces and metrics. Export off when unset. |
+| `otel.service_name`          | `service.name` resource attribute (default `telegateway`).  |
 | `bots[].id`                  | Public id used in the webhook route. Must be unique.         |
 | `bots[].downstream_url`      | Internal bot endpoint receiving the forwarded update.       |
 | `bots[].webhook_secret`      | Compared in constant time against Telegram's secret header. |
 | `bots[].rate_limit_per_minute` | Per-chat token-bucket quota (default `30`).                |
 
 Set `RUST_LOG` to control log verbosity, e.g. `RUST_LOG=telegateway=debug`.
+
+### OpenTelemetry
+
+Point the gateway at an OTLP/HTTP collector to export traces and metrics:
+
+```toml
+[otel]
+endpoint = "http://localhost:4318"
+# service_name = "telegateway"
+```
+
+Spans cover webhook ingress, outbox deliveries, breaker probes, replays,
+and Telegram registrations, with `bot_id` and `update_id` as attributes.
+Metrics include per-bot counters (accepted, delivered, failed,
+dead-lettered, replayed), delivery latency, pending outbox depth, and
+breaker state. Outbound requests carry W3C `traceparent` headers so your
+bots can continue the trace. Without `[otel]`, nothing leaves the process
+and every instrument is a no-op. A dead collector only drops telemetry —
+it never breaks the gateway.
 
 ### TLS
 

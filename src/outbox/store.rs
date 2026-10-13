@@ -280,6 +280,19 @@ impl Store {
         Ok(())
     }
 
+    /// Pending row counts per bot, for the `telegateway.outbox.pending` gauge.
+    pub async fn pending_counts(&self) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT bot_id, COUNT(*) AS n FROM outbox WHERE status = 'pending' GROUP BY bot_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("bot_id"), r.get::<i64, _>("n")))
+            .collect())
+    }
+
     /// Test helper: make a row due immediately, bypassing backoff.
     pub async fn force_due(&self, id: i64) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE outbox SET next_attempt_at = 0 WHERE id = ?")

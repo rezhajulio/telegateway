@@ -83,6 +83,11 @@ struct ReplayResponse {
 /// Re-deliver a past update to a bot's downstream, synchronously, for
 /// debugging. The downstream sees the original `update_id`, so the bot
 /// treats it like the real thing.
+#[tracing::instrument(
+    name = "admin.replay",
+    skip(state, headers),
+    fields(bot_id = %req.bot_id)
+)]
 pub async fn replay(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -148,17 +153,22 @@ pub async fn replay(
         "replaying update"
     );
     match deliver_payload(&state.http, &bot, update_id, &payload).await {
-        Ok(status) => (
-            StatusCode::OK,
-            Json(ReplayResponse {
-                ok: true,
-                bot_id: bot.id,
-                update_id,
-                downstream_status: Some(status.as_u16()),
-                error: None,
-            }),
-        )
-            .into_response(),
+        Ok(status) => {
+            crate::otel::metrics()
+                .updates_replayed
+                .add(1, &crate::otel::bot_attrs(&bot.id));
+            (
+                StatusCode::OK,
+                Json(ReplayResponse {
+                    ok: true,
+                    bot_id: bot.id,
+                    update_id,
+                    downstream_status: Some(status.as_u16()),
+                    error: None,
+                }),
+            )
+                .into_response()
+        }
         Err(error) => (
             StatusCode::BAD_GATEWAY,
             Json(ReplayResponse {

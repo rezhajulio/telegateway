@@ -27,6 +27,11 @@ pub fn webhook_url(public_url: &str, bot_id: &str) -> String {
 }
 
 /// Register one bot's webhook with Telegram via `setWebhook`.
+#[tracing::instrument(
+    name = "telegram.register",
+    skip(client, bot),
+    fields(bot_id = %bot.id)
+)]
 pub async fn register_bot(
     client: &reqwest::Client,
     api_base: &str,

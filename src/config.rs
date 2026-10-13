@@ -37,6 +37,10 @@ pub struct Config {
     /// Admin API guard. When absent, admin routes are not registered.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
+    /// OpenTelemetry export. When absent, no traces/metrics leave the
+    /// process and every instrument is a no-op.
+    #[serde(default)]
+    pub otel: Option<OtelConfig>,
 }
 
 /// Configuration for a single downstream bot.
@@ -164,6 +168,21 @@ pub struct AdminConfig {
     pub token: String,
 }
 
+/// OpenTelemetry export settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OtelConfig {
+    /// OTLP/HTTP collector base URL, e.g. "http://localhost:4318".
+    /// Traces go to `{endpoint}/v1/traces`, metrics to `{endpoint}/v1/metrics`.
+    pub endpoint: String,
+    /// `service.name` resource attribute.
+    #[serde(default = "default_otel_service_name")]
+    pub service_name: String,
+}
+
+fn default_otel_service_name() -> String {
+    "telegateway".to_owned()
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot read config file: {0}")]
@@ -268,6 +287,16 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::Validation(
             "`admin.token` must not be empty".to_owned(),
+        ));
+    }
+
+    if config
+        .otel
+        .as_ref()
+        .is_some_and(|otel| reqwest::Url::parse(&otel.endpoint).is_err())
+    {
+        return Err(ConfigError::Validation(
+            "`otel.endpoint` is not a valid URL".to_owned(),
         ));
     }
 
