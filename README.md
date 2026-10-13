@@ -176,6 +176,27 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the release process,
 [docs/TESTING.md](docs/TESTING.md) for the test setup, and
 [CHANGELOG.md](CHANGELOG.md) for what changed between releases.
 
+## Docker
+
+Multi-stage build: Rust compiles the release binary, and the runtime image
+is `debian:bookworm-slim` with only CA certificates added (SQLite is
+statically linked). It runs as a non-root user and keeps the outbox database
+in `/data`.
+
+```sh
+docker build -t telegateway .
+docker run -d --name telegateway \
+  -p 8080:8080 \
+  -v ./config.toml:/data/config.toml:ro \
+  -v telegateway-data:/data \
+  telegateway
+```
+
+The container expects the config at `/data/config.toml` (override with
+`docker run ... telegateway --config /path/to/config.toml`). Set
+`listen = "0.0.0.0:8080"` in the config so the gateway is reachable outside
+the container.
+
 ## How it works
 
 ```
