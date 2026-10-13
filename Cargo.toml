@@ -6,6 +6,9 @@ description = "A reverse-proxy gateway for Telegram bots: webhook ingress, per-c
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/rezhajulio/telegateway"
 authors = ["Rezha Julio <contact@rezhajulio.id>"]
+readme = "README.md"
+keywords = ["telegram", "webhook", "gateway", "bot", "reverse-proxy"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "telegateway"

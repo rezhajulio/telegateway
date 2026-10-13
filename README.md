@@ -170,6 +170,10 @@ cargo build --release
 ./target/release/telegateway --config config.toml
 ```
 
+Prebuilt binaries are attached to each [GitHub Release](https://github.com/rezhajulio/telegateway/releases);
+tagged releases are also published to crates.io (`cargo install telegateway`).
+See [docs/RELEASING.md](docs/RELEASING.md) for the release process.
+
 ## How it works
 
 ```
