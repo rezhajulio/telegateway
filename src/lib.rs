@@ -3,5 +3,6 @@
 pub mod app;
 pub mod config;
 pub mod policy;
+pub mod register;
 pub mod routes;
 pub mod telegram;

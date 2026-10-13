@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use telegateway::{app, config};
+use telegateway::{app, config, register};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
@@ -37,6 +37,13 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .parse()
         .context("invalid `listen` address in config")?;
+
+    if cfg.auto_register {
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            register::register_all(&cfg, register::TELEGRAM_API_BASE).await;
+        });
+    }
 
     match &cfg.tls {
         Some(tls) => {

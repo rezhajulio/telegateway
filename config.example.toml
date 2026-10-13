@@ -1,6 +1,11 @@
 # Copy to config.toml and fill in your bots. Never commit the real file.
 listen = "127.0.0.1:8080"
 
+# Optional: register webhooks with Telegram on startup instead of calling
+# setWebhook by hand. Requires `public_url` and a `bot_token` per bot.
+# public_url = "https://gateway.example.com"
+# auto_register = true
+
 # Optional: terminate TLS in the gateway itself when no reverse proxy
 # sits in front. With [tls] present, `listen` serves HTTPS.
 # [tls]
@@ -10,6 +15,8 @@ listen = "127.0.0.1:8080"
 [[bots]]
 # Public route: POST /webhooks/mediadownloadbot
 id = "mediadownloadbot"
+# Token from BotFather. Only needed for webhook registration.
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 # Internal bot endpoint that receives the forwarded update.
 downstream_url = "http://127.0.0.1:8081/webhook"
 # Must match the secret passed to Telegram's setWebhook.

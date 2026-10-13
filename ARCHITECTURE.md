@@ -128,6 +128,11 @@ config rather than serving with a half-loaded one. Secrets come from the file
 (or the environment via the operator's secret management); they never appear
 in logs or error responses.
 
+With `auto_register = true` and `public_url` set, the gateway calls
+`setWebhook` for every bot that has a `bot_token` when it starts, in a
+background task after the listener binds. Registration failures are logged
+and never stop the gateway; bots without a token are skipped.
+
 ## 8. Security
 
 - Webhook secrets are compared in constant time.

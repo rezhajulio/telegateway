@@ -3,8 +3,14 @@
 #   telegateway --config example/config.toml
 listen = "127.0.0.1:8080"
 
+# Pointing at real Telegram? Uncomment, set your public URL and bot tokens,
+# and the gateway registers every webhook on startup.
+# public_url = "https://gateway.example.com"
+# auto_register = true
+
 [[bots]]
 id = "echo-python"
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 downstream_url = "http://127.0.0.1:8081/webhook"
 webhook_secret = "python-secret"
 rate_limit_per_minute = 30

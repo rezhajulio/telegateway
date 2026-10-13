@@ -51,13 +51,14 @@ an unknown bot id gets `404`.
 
 ## With real Telegram
 
-Expose the gateway publicly (it must reach Telegram's servers), then register
-one webhook per bot with its matching secret:
+Expose the gateway publicly, then let it register the webhooks itself:
 
-```sh
-curl -s "https://api.telegram.org/bot<token>/setWebhook" \
-  -d "url=https://gateway.example.com/webhooks/echo-python" \
-  -d "secret_token=python-secret"
+```toml
+# example/config.toml
+public_url = "https://gateway.example.com"
+auto_register = true
 ```
 
-Message the bot and it echoes back.
+Put each bot's token from [@BotFather](https://t.me/BotFather) in its
+`[[bots]]` section as `bot_token`, restart the gateway, and watch the logs:
+one `webhook registered` line per bot. Message a bot and it echoes back.

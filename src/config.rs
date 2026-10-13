@@ -16,6 +16,13 @@ pub struct Config {
     /// The bots served by this gateway.
     #[serde(default)]
     pub bots: Vec<BotConfig>,
+    /// Public base URL Telegram uses to reach the gateway, e.g.
+    /// "https://gateway.example.com". Required when `auto_register` is true.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// Register every bot's webhook with Telegram on startup.
+    #[serde(default)]
+    pub auto_register: bool,
     /// TLS termination settings. When present, the gateway serves HTTPS
     /// on `listen` instead of plain HTTP.
     #[serde(default)]
@@ -27,6 +34,10 @@ pub struct Config {
 pub struct BotConfig {
     /// Public identifier used in the webhook route: `POST /webhooks/:id`.
     pub id: String,
+    /// Bot token from BotFather. Only needed for webhook registration;
+    /// bots without one are skipped by `auto_register`.
+    #[serde(default)]
+    pub bot_token: Option<String>,
     /// Internal HTTP endpoint the update is forwarded to.
     pub downstream_url: String,
     /// Value of Telegram's `X-Telegram-Bot-Api-Secret-Token` header.
@@ -121,6 +132,18 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
+    if config.auto_register
+        && config
+            .public_url
+            .as_ref()
+            .map(|u| u.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(ConfigError::Validation(
+            "`public_url` is required when `auto_register` is true".to_owned(),
+        ));
+    }
+
     if let Some(tls) = &config.tls {
         for (name, path) in [
             ("tls.cert_path", tls.cert_path.as_str()),
@@ -183,6 +206,21 @@ webhook_secret = "other"
     fn rejects_empty_bots() {
         let config: Config = toml::from_str(r#"listen = "127.0.0.1:8080""#).unwrap();
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_auto_register_without_public_url() {
+        let text = "auto_register = true\n".to_owned() + valid_toml();
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn accepts_auto_register_with_public_url() {
+        let text = "auto_register = true\npublic_url = \"https://gw.example.com\"\n".to_owned()
+            + valid_toml();
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
     }
 
     #[test]

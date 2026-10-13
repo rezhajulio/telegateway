@@ -58,6 +58,7 @@ mod tests {
     fn bots() -> Vec<BotConfig> {
         vec![BotConfig {
             id: "demo".to_owned(),
+            bot_token: None,
             downstream_url: "http://127.0.0.1:8081/webhook".to_owned(),
             webhook_secret: "s3cret".to_owned(),
             rate_limit_per_minute: 2,

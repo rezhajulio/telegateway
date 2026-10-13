@@ -32,15 +32,25 @@ $EDITOR config.toml
 # {"level":"INFO","fields":{"addr":"127.0.0.1:8080","bots":1},"message":"telegateway listening"}
 ```
 
-3. Point Telegram at it with a webhook secret:
+3. Let the gateway register the webhooks itself. Add to `config.toml`:
 
-```sh
-curl -s "https://api.telegram.org/bot<token>/setWebhook" \
-  -d "url=https://gateway.example.com/webhooks/mediadownloadbot" \
-  -d "secret_token=<the webhook_secret from config.toml>"
+```toml
+public_url = "https://gateway.example.com"
+auto_register = true
 ```
 
-Telegram now delivers updates to the gateway, which forwards them to your bot's internal endpoint.
+and put each bot's token from [@BotFather](https://t.me/BotFather) in its
+`[[bots]]` section as `bot_token`. On startup the gateway calls `setWebhook`
+for every bot that has a token and logs the result:
+
+```sh
+./telegateway --config config.toml
+# {"level":"INFO","fields":{"bot_id":"mediadownloadbot","url":"https://gateway.example.com/webhooks/mediadownloadbot"},"message":"webhook registered"}
+```
+
+Telegram now delivers updates to the gateway, which forwards them to your
+bot's internal endpoint. `config.toml` is gitignored, so tokens stay on your
+machine. Bots without a token are skipped.
 
 ## Routes
 
