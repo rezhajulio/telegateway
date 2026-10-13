@@ -29,9 +29,8 @@ stops before the GitHub Release is created.
 
 1. Bump `version` in `Cargo.toml` (follow semver; every release needs a
    new version; crates.io versions are immutable).
-2. Update `CHANGELOG.md` if there is something worth noting. (There is
-   no changelog file yet; releases so far are described by the GitHub
-   Release notes.)
+2. Add an entry to `CHANGELOG.md` under `[Unreleased]` (Keep a Changelog
+   format); it becomes the release notes.
 3. Commit and push to `main`. Wait for CI to go green.
 4. Tag and push the tag:
    ```
