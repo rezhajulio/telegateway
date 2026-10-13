@@ -1,0 +1,6 @@
+[advisories]
+# rsa is listed in Cargo.lock only via sqlx-macros-core's mysql/postgres
+# drivers; it is not compiled into any telegateway target
+# (`cargo tree -i rsa --target all` is empty), and no fixed release exists.
+# Revisit when sqlx stops locking it.
+ignore = ["RUSTSEC-2023-0071"]
