@@ -7,40 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Config: `outbox.max_pending` bounds queued updates per bot (sheds with 503 when reached).
-- Config: `[admin] listen` serves admin routes on a dedicated socket address, removing them from the public listener.
-- Config: secrets (`bot_token`, `webhook_secret`, `admin.token`) are redacted as `[REDACTED]` in `Debug` output.
-- Ingress: load shedding with 503 when concurrency limit is saturated.
-- Ingress: rate limiting keys on chat ID or sender user ID when chat is omitted.
-- Downstream: honor `Retry-After` response headers on 429 and 503 responses.
-- Downstream: delivery ordering is per-bot sequential and best-effort (at-least-once; downstreams dedupe on `update_id`).
-- Runtime: SIGHUP reloads TLS certificate and private key.
-- Runtime: container image includes a `HEALTHCHECK` probing `/healthz`.
-- Database: migration 002 adds a status `CHECK` constraint and an optimized claim index.
-- Telemetry: outbox depth gauge reports 0 for idle bots.
-
-### Changed
-
-- Ingress: verifies bot existence and webhook secret in constant time before parsing the body.
-- Ingress: stores and forwards original raw bytes received from Telegram without re-serialization.
-- Ingress: checks duplicate updates before consuming token-bucket rate limit quota.
-- Ingress: rate limiter in-memory state is pruned hourly.
-- Downstream: 4xx responses (except 408, 425, 429) dead-letter immediately and do not trip the circuit breaker.
-- Downstream: HTTP client disables redirect following and enforces a 5s connect timeout; timeouts produce status 504.
-- Downstream: requeuing rows while the circuit breaker is open no longer increments attempt counters.
-- Downstream: recovery from process crashes retains existing retry backoff intervals.
-- Downstream: delivery error messages strip downstream and Telegram URLs to prevent credential leakage.
-- Lifecycle: graceful shutdown lets dispatchers finish in-flight delivery before stopping.
-- Lifecycle: unexpected dispatcher exit terminates the process with non-zero exit code for orchestrator restarts.
-- Lifecycle: webhook auto-registration retries on failure with exponential backoff.
-- Validation: enforced minimum 32 characters for `admin.token`.
-- Validation: enforced `[A-Za-z0-9_-]{1,64}` for bot IDs and `[A-Za-z0-9_-]{1,256}` for webhook secrets.
-- Validation: enforced HTTP/HTTPS schemes and valid hosts for downstream URLs and OTEL endpoint.
-- Validation: enforced HTTPS scheme and host for `public_url`.
-- Validation: enforced non-empty `bot_token` without whitespace, `/`, `?`, or `#`.
-- Validation: enforced `poll_interval_ms >= 1`, `delivered_retention_days` in `1..=36500`, and `max_cooldown_secs >= cooldown_secs`.
 ## [0.1.0] - 2026-10-13
 
 First release.
@@ -71,6 +37,30 @@ First release.
   config.
 - JSON structured logs; `/healthz` and `/readyz` probes
   (`/readyz` checks the database).
+- Bounded queues: `outbox.max_pending` sheds with `503` per bot;
+  `outbox.max_dead_letters` caps dead letters per bot (plus 30-day age limit).
+- Separate admin listener (`[admin] listen`) to keep admin routes off the
+  public socket; admin token must be at least 32 characters.
+- Load shedding (`503`) when the concurrency limit is saturated; request
+  timeouts answer `504`.
+- Webhook authentication happens before the body is parsed; the original
+  bytes Telegram sent are stored and forwarded unchanged. Rate limiting
+  keys on chat id, falling back to the sending user; duplicates do not
+  consume quota.
+- Downstream handling: 4xx (except 408/425/429) dead-letter immediately
+  without tripping the breaker; `Retry-After` honored on 429/503;
+  redirects are not followed; 5s connect timeout.
+- Secrets (`bot_token`, `webhook_secret`, admin token) are redacted in
+  `Debug`, and URLs are stripped from delivery and registration errors.
+- Strict config validation (id/secret charsets, http/https URLs, https
+  `public_url`, positive intervals, retention bounds).
+- Supervised workers and graceful shutdown: dispatchers finish the
+  in-flight delivery; a dead worker exits the process non-zero.
+- SIGHUP reloads the TLS certificate and key.
+- Webhook auto-registration retries with backoff.
+- Container image `HEALTHCHECK` on `/healthz`.
+- Delivery is at-least-once, per-bot sequential, best-effort ordered;
+  downstream bots must dedupe on `update_id`.
 - Release automation: `cargo publish` to crates.io and release binaries
   (Linux x86_64, macOS ARM64) on `v*` tags. See `docs/RELEASING.md`.
 

@@ -461,10 +461,11 @@ impl Dispatcher {
 }
 
 /// Periodically prune delivered rows older than `delivered_retention_days`
-/// and dead letters older than 30 days. Exits gracefully when shutdown is signaled.
+/// and dead letters older than 30 days or beyond `max_dead_per_bot` per bot. Exits gracefully when shutdown is signaled.
 pub async fn janitor(
     store: Store,
     delivered_retention_days: u64,
+    max_dead_per_bot: u64,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(3600));
@@ -485,7 +486,14 @@ pub async fn janitor(
         let days = delivered_retention_days.min(36500) as i64;
         let delivered_cutoff = now.saturating_sub(days.saturating_mul(86_400_000));
         let dead_cutoff = now.saturating_sub(30 * 86_400_000);
-        if let Err(e) = store.prune(delivered_cutoff, dead_cutoff).await {
+        if let Err(e) = store
+            .prune(
+                delivered_cutoff,
+                dead_cutoff,
+                i64::try_from(max_dead_per_bot).unwrap_or(i64::MAX),
+            )
+            .await
+        {
             tracing::error!(error = %e, "outbox prune failed");
         }
     }

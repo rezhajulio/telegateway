@@ -127,4 +127,4 @@ Exactly one of `update_id` and `payload` is required.
 
 Only stored updates within retention can be replayed by id: delivered
 rows are pruned after `outbox.delivered_retention_days` (default 7),
-dead letters after 30 days.
+dead letters after 30 days or beyond `outbox.max_dead_letters` per bot.

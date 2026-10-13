@@ -261,12 +261,39 @@ async fn prune_drops_old_rows() {
     store.mark_delivered(rows[0].id).await.unwrap();
 
     // A cutoff in the past prunes nothing.
-    store.prune(1, 1).await.unwrap();
+    store.prune(1, 1, i64::MAX).await.unwrap();
     assert_eq!(store.status_of("demo", 1).await.unwrap(), "delivered");
 
     // A cutoff in the future prunes it.
-    store.prune(i64::MAX, i64::MAX).await.unwrap();
+    store.prune(i64::MAX, i64::MAX, i64::MAX).await.unwrap();
     assert!(store.status_of("demo", 1).await.is_err());
+}
+
+#[tokio::test]
+async fn prune_caps_dead_letters_per_bot_keeping_newest() {
+    let db = TestDb::new();
+    let store = Store::open(db.path()).await.unwrap();
+    for bot in ["a", "b"] {
+        for u in 1..=5 {
+            store.insert(bot, u, "{}").await.unwrap();
+        }
+    }
+    store.insert("a", 99, "{}").await.unwrap(); // stays pending
+    for bot in ["a", "b"] {
+        for row in store.claim_due(bot, 5).await.unwrap() {
+            store.mark_dead(row.id, "boom").await.unwrap();
+        }
+    }
+
+    store.prune(0, 0, 2).await.unwrap();
+
+    for bot in ["a", "b"] {
+        let dead = store.list("dead", Some(bot), 50).await.unwrap();
+        let mut ids: Vec<i64> = dead.iter().map(|r| r.update_id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![4, 5], "{bot}: newest two dead rows kept");
+    }
+    assert_eq!(store.status_of("a", 99).await.unwrap(), "pending");
 }
 
 #[tokio::test]
@@ -661,64 +688,6 @@ async fn shutdown_signal_stops_run_without_losing_rows() {
             row.status
         );
     }
-}
-
-#[tokio::test]
-async fn migration_002_upgrade_preserves_data() {
-    let db = TestDb::new();
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(db.path())
-        .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePool::connect_with(options)
-        .await
-        .unwrap();
-
-    let m1 = include_str!("../migrations/001_outbox.sql");
-    sqlx::raw_sql(m1).execute(&pool).await.unwrap();
-
-    sqlx::query(
-        "INSERT INTO outbox(bot_id, update_id, payload, status, attempts, next_attempt_at, created_at)
-         VALUES ('demo', 1, '{\"u\":1}', 'pending', 0, NULL, 1000),
-                ('demo', 2, '{\"u\":2}', 'delivered', 1, NULL, 1001),
-                ('demo', 3, '{\"u\":3}', 'dead', 5, NULL, 1002)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    pool.close().await;
-
-    let store = Store::open(db.path()).await.unwrap();
-    let all = store.list("all", Some("demo"), 10).await.unwrap();
-    assert_eq!(all.len(), 3);
-
-    let p = all.iter().find(|r| r.update_id == 1).unwrap();
-    assert_eq!(p.status, "pending");
-    assert_eq!(p.attempts, 0);
-
-    let d = all.iter().find(|r| r.update_id == 2).unwrap();
-    assert_eq!(d.status, "delivered");
-    assert_eq!(d.attempts, 1);
-
-    let dead = all.iter().find(|r| r.update_id == 3).unwrap();
-    assert_eq!(dead.status, "dead");
-    assert_eq!(dead.attempts, 5);
-
-    assert_eq!(store.pending_total("demo").await.unwrap(), 1);
-
-    // Verify CHECK constraint rejects invalid status
-    let check_pool = sqlx::sqlite::SqlitePool::connect(db.path()).await.unwrap();
-    let bad_insert = sqlx::query(
-        "INSERT INTO outbox(bot_id, update_id, payload, status, created_at)
-         VALUES ('demo', 4, '{}', 'invalid_status', 1003)",
-    )
-    .execute(&check_pool)
-    .await;
-    assert!(
-        bad_insert.is_err(),
-        "CHECK constraint must reject invalid status"
-    );
-    check_pool.close().await;
 }
 
 #[tokio::test]

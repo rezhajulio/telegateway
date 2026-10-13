@@ -8,10 +8,13 @@ cargo test --test gateway  # one integration target
 cargo test breaker         # filter by name substring
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo llvm-cov --all-targets --summary-only   # line coverage (cargo install cargo-llvm-cov)
 ```
 
-CI runs fmt, clippy with `-D warnings`, and `cargo test --all-targets`
-on every push and pull request. Keep all three green before pushing.
+CI runs fmt, clippy with `-D warnings`, and the tests under
+`cargo llvm-cov` on every push and pull request, failing below 75% line
+coverage (currently about 80%; `src/main.rs` is not covered because no
+test launches the binary). Keep all of it green before pushing.
 
 ## Layout
 

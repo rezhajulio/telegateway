@@ -132,8 +132,8 @@ before answering Telegram, so a crashed or downed bot loses nothing.
   `max_cooldown_secs`. State is in-memory like the rate limiter.
 - **Hygiene & Schema**: a janitor prunes delivered rows after
   `outbox.delivered_retention_days` (default 7) and dead letters after
-  30 days. DB migration 002 enforces a status CHECK constraint and adds
-  an optimized index for atomic claims.
+  30 days or beyond `outbox.max_dead_letters` per bot (oldest first). The schema enforces a status CHECK constraint and has an
+  index tuned for atomic claims.
 - **Ordering**: each bot's dispatcher works sequentially; delivery ordering
   is at-least-once, per-bot sequential, best-effort order (retries reorder
   around failed updates). Downstream must deduplicate on `update_id`.

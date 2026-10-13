@@ -79,9 +79,10 @@ async fn run_gateway(cfg: config::Config) -> anyhow::Result<()> {
     // Spawn janitor
     let janitor_store = built.store.clone();
     let janitor_days = cfg.outbox.delivered_retention_days;
+    let janitor_max_dead = cfg.outbox.max_dead_letters;
     let janitor_rx = shutdown_rx.clone();
     workers.spawn(async move {
-        outbox::dispatch::janitor(janitor_store, janitor_days, janitor_rx).await;
+        outbox::dispatch::janitor(janitor_store, janitor_days, janitor_max_dead, janitor_rx).await;
         Ok("janitor")
     });
 

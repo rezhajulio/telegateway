@@ -16,7 +16,10 @@ RUN mkdir -p src \
 
 COPY src ./src
 COPY migrations ./migrations
-RUN cargo build --release --locked \
+# COPY preserves host mtimes, which can predate the stub build's artifacts;
+# touch so cargo rebuilds the real sources instead of reusing the stub.
+RUN touch src/main.rs src/lib.rs \
+    && cargo build --release --locked \
     && cp target/release/telegateway /usr/local/bin/telegateway
 
 # ---------------------------------------------------------------------------

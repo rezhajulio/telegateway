@@ -108,13 +108,17 @@ pub struct OutboxConfig {
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
     /// Delivered rows are pruned after this many days; dead letters after
-    /// 30 days.
+    /// 30 days (or beyond `max_dead_letters` per bot).
     #[serde(default = "default_delivered_retention_days")]
     pub delivered_retention_days: u64,
     /// Maximum pending and in-flight updates allowed per bot before new
     /// updates are shed with HTTP 503.
     #[serde(default = "default_max_pending")]
     pub max_pending: u64,
+    /// Dead letters kept per bot; the oldest beyond this are pruned
+    /// hourly, in addition to the 30-day age limit.
+    #[serde(default = "default_max_dead_letters")]
+    pub max_dead_letters: u64,
 }
 
 impl Default for OutboxConfig {
@@ -125,11 +129,16 @@ impl Default for OutboxConfig {
             poll_interval_ms: default_poll_interval_ms(),
             delivered_retention_days: default_delivered_retention_days(),
             max_pending: default_max_pending(),
+            max_dead_letters: default_max_dead_letters(),
         }
     }
 }
 
 fn default_max_pending() -> u64 {
+    10_000
+}
+
+fn default_max_dead_letters() -> u64 {
     10_000
 }
 
@@ -354,6 +363,12 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.outbox.max_pending == 0 {
         return Err(ConfigError::Validation(
             "`outbox.max_pending` must be at least 1".to_owned(),
+        ));
+    }
+
+    if config.outbox.max_dead_letters == 0 {
+        return Err(ConfigError::Validation(
+            "`outbox.max_dead_letters` must be at least 1".to_owned(),
         ));
     }
 
@@ -676,6 +691,18 @@ webhook_secret = "other"
             "{}\n[outbox]\ndelivered_retention_days = 40000\n",
             valid_toml()
         );
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_outbox_max_dead_letters() {
+        let text = format!("{}\n[outbox]\nmax_dead_letters = 50\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.outbox.max_dead_letters, 50);
+
+        let text = format!("{}\n[outbox]\nmax_dead_letters = 0\n", valid_toml());
         let config: Config = toml::from_str(&text).unwrap();
         assert!(validate(&config).is_err());
     }

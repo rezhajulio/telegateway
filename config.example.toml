@@ -10,6 +10,7 @@ listen = "127.0.0.1:8080"
 # poll_interval_ms = 1000
 # delivered_retention_days = 7
 # max_pending = 10000        # webhook sheds with 503 when pending+in_flight reaches this
+# max_dead_letters = 10000   # dead letters kept per bot (oldest pruned first)
 # Circuit breaker per downstream bot: after this many consecutive
 # failures, delivery pauses for cooldown_secs, then a probe goes out.
 # [circuit_breaker]

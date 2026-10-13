@@ -323,9 +323,14 @@ impl Store {
         Ok(row.map(|r| r.get("payload")))
     }
 
-    /// Drop delivered rows older than `delivered_cutoff` and dead rows older
+    /// Drop delivered rows older than `delivered_cutoff`, dead rows older
     /// than `dead_cutoff` (both unix millis).
-    pub async fn prune(&self, delivered_cutoff: i64, dead_cutoff: i64) -> Result<(), sqlx::Error> {
+    pub async fn prune(
+        &self,
+        delivered_cutoff: i64,
+        dead_cutoff: i64,
+        max_dead_per_bot: i64,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM outbox WHERE status = 'delivered' AND created_at < ?")
             .bind(delivered_cutoff)
             .execute(&self.pool)
@@ -334,6 +339,18 @@ impl Store {
             .bind(dead_cutoff)
             .execute(&self.pool)
             .await?;
+        // Cap dead letters per bot: keep only the newest `max_dead_per_bot`.
+        sqlx::query(
+            "DELETE FROM outbox WHERE id IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (PARTITION BY bot_id ORDER BY id DESC) AS rn
+                 FROM outbox WHERE status = 'dead'
+               ) WHERE rn > ?
+             )",
+        )
+        .bind(max_dead_per_bot)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
