@@ -22,7 +22,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 clap = { version = "4", features = ["derive"] }
 constant_time_eq = "0.3"
 fastrand = "2"
