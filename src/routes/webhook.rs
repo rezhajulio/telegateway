@@ -1,7 +1,5 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
-use std::time::Duration;
-
 use axum::{
     Json,
     extract::{Path, State},
@@ -15,16 +13,17 @@ use crate::{app::AppState, telegram};
 /// Telegram's header carrying the webhook secret configured via `setWebhook`.
 const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
 
-/// Receive a Telegram webhook update, apply admission policy, and forward it
-/// to the downstream bot.
+/// Receive a Telegram webhook update, apply admission policy, and persist it
+/// to the outbox. Delivery to the downstream bot happens asynchronously.
 ///
 /// Response contract with Telegram:
 /// - `200` for accepted, duplicate, or policy-rejected updates. Telegram
 ///   retries anything else, and retrying a rate-limited update only makes
 ///   the abuse worse.
 /// - `4xx` for malformed requests (unknown bot, bad secret, bad envelope).
-/// - `502` when the downstream bot is unreachable or errors, so Telegram
-///   retries the delivery later.
+/// - `503` when the outbox is unavailable, so Telegram retries the delivery
+///   later. A downed downstream bot no longer surfaces here: the dispatcher
+///   retries delivery in the background.
 pub async fn webhook_handler(
     State(state): State<AppState>,
     Path(bot_id): Path<String>,
@@ -62,46 +61,38 @@ pub async fn webhook_handler(
         return (StatusCode::OK, "rate limited").into_response();
     }
 
-    let started = std::time::Instant::now();
-    let forward = state
-        .http
-        .post(&bot.downstream_url)
-        .timeout(Duration::from_secs(25))
-        .header("content-type", "application/json")
-        .header("x-telegateway-bot", &bot_id)
-        .header("x-telegateway-update-id", envelope.update_id.to_string())
-        .json(&body)
-        .send()
-        .await;
-
-    match forward {
-        Ok(resp) => {
-            let status = resp.status();
-            tracing::info!(
-                bot_id = %bot_id,
-                update_id = envelope.update_id,
-                kind = ?envelope.kind,
-                chat_key = ?envelope.chat_key,
-                downstream_status = %status,
-                latency_ms = started.elapsed().as_millis(),
-                "update forwarded"
-            );
-            if status.is_success() {
-                (StatusCode::OK, "ok").into_response()
-            } else {
-                (StatusCode::BAD_GATEWAY, "downstream error").into_response()
-            }
-        }
+    match state
+        .store
+        .insert(&bot_id, envelope.update_id, &body.to_string())
+        .await
+    {
+        Ok(true) => tracing::info!(
+            bot_id = %bot_id,
+            update_id = envelope.update_id,
+            kind = ?envelope.kind,
+            chat_key = ?envelope.chat_key,
+            "update accepted"
+        ),
+        Ok(false) => tracing::debug!(
+            bot_id = %bot_id,
+            update_id = envelope.update_id,
+            "duplicate update ignored"
+        ),
         Err(err) => {
             tracing::error!(
                 bot_id = %bot_id,
                 update_id = envelope.update_id,
                 error = %err,
-                "downstream unreachable"
+                "outbox write failed"
             );
-            (StatusCode::BAD_GATEWAY, "downstream unreachable").into_response()
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox unavailable").into_response();
         }
     }
+
+    if let Some(notify) = state.notifies.get(&bot_id) {
+        notify.notify_one();
+    }
+    (StatusCode::OK, "ok").into_response()
 }
 
 /// Constant-time comparison so the secret cannot be probed byte-by-byte

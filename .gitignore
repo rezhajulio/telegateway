@@ -1,5 +1,6 @@
 /target/
 /config.toml
+outbox.db*
 *.log
 .env
 example/echo-rust/target/

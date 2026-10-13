@@ -1,6 +1,17 @@
 # Copy to config.toml and fill in your bots. Never commit the real file.
 listen = "127.0.0.1:8080"
 
+# Durable outbox: accepted updates are stored in SQLite and delivered
+# asynchronously with retries.
+# [outbox]
+# path = "outbox.db"
+# max_attempts = 25
+
+# Admin API: guards GET /outbox/dead (dead-letter listing). The route is
+# not registered without this section.
+# [admin]
+# token = "change-me-to-a-long-random-value"
+
 # Optional: register webhooks with Telegram on startup instead of calling
 # setWebhook by hand. Requires `public_url` and a `bot_token` per bot.
 # public_url = "https://gateway.example.com"

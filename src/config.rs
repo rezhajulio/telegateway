@@ -27,6 +27,13 @@ pub struct Config {
     /// on `listen` instead of plain HTTP.
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// Durable outbox: accepted updates are persisted and delivered
+    /// asynchronously with retries.
+    #[serde(default)]
+    pub outbox: OutboxConfig,
+    /// Admin API guard. When absent, admin routes are not registered.
+    #[serde(default)]
+    pub admin: Option<AdminConfig>,
 }
 
 /// Configuration for a single downstream bot.
@@ -63,6 +70,59 @@ pub struct TlsConfig {
     pub cert_path: String,
     /// Path to the PEM-encoded private key.
     pub key_path: String,
+}
+
+/// Durable outbox settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutboxConfig {
+    /// SQLite file holding the outbox. Created on first start.
+    #[serde(default = "default_outbox_path")]
+    pub path: String,
+    /// Failed deliveries are retried this many times before the update is
+    /// dead-lettered.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Sweep interval for due retries, in milliseconds. Ingest also wakes
+    /// the dispatcher directly, so this only bounds retry latency.
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Delivered rows are pruned after this many days; dead letters after
+    /// 30 days.
+    #[serde(default = "default_delivered_retention_days")]
+    pub delivered_retention_days: u64,
+}
+
+impl Default for OutboxConfig {
+    fn default() -> Self {
+        Self {
+            path: default_outbox_path(),
+            max_attempts: default_max_attempts(),
+            poll_interval_ms: default_poll_interval_ms(),
+            delivered_retention_days: default_delivered_retention_days(),
+        }
+    }
+}
+
+fn default_outbox_path() -> String {
+    "outbox.db".to_owned()
+}
+
+fn default_max_attempts() -> u32 {
+    25
+}
+
+fn default_poll_interval_ms() -> u64 {
+    1000
+}
+
+fn default_delivered_retention_days() -> u64 {
+    7
+}
+
+/// Admin API settings. The token guards the `/outbox/*` routes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminConfig {
+    pub token: String,
 }
 
 #[derive(Debug, Error)]
@@ -141,6 +201,22 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::Validation(
             "`public_url` is required when `auto_register` is true".to_owned(),
+        ));
+    }
+
+    if config.outbox.max_attempts == 0 {
+        return Err(ConfigError::Validation(
+            "`outbox.max_attempts` must be at least 1".to_owned(),
+        ));
+    }
+
+    if config
+        .admin
+        .as_ref()
+        .is_some_and(|admin| admin.token.trim().is_empty())
+    {
+        return Err(ConfigError::Validation(
+            "`admin.token` must not be empty".to_owned(),
         ));
     }
 

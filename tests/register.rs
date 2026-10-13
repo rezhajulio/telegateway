@@ -78,6 +78,8 @@ async fn register_all_skips_bots_without_token() {
         auto_register: true,
         bots: vec![test_bot(), no_token],
         tls: None,
+        outbox: Default::default(),
+        admin: None,
     };
 
     register_all(&config, &base).await;

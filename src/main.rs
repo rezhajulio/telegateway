@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use telegateway::{app, config, register};
+use telegateway::{app, config, outbox, register};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
@@ -31,7 +31,18 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::load(&cli.config)
         .with_context(|| format!("failed to load config from {}", cli.config.display()))?;
-    let router = app::build_router(cfg.clone());
+    let built = app::build_router(cfg.clone())
+        .await
+        .context("failed to build gateway")?;
+
+    for dispatcher in built.dispatchers {
+        tokio::spawn(async move { dispatcher.run().await });
+    }
+    tokio::spawn(outbox::dispatch::janitor(
+        built.store.clone(),
+        cfg.outbox.delivered_retention_days,
+    ));
+    let router = built.router;
 
     let addr: SocketAddr = cfg
         .listen

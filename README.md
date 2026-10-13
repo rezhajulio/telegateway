@@ -11,10 +11,11 @@
 ## Why telegateway?
 
 - **One ingress for every bot.** `POST /webhooks/:bot_id` routes to any number of downstream bots, each with its own secret and policy. A new bot is five lines of TOML.
+- **Accepted means kept.** Updates are persisted to a local SQLite outbox before Telegram gets its `200`, then delivered asynchronously with retries. A downed bot loses nothing.
 - **Abuse protection before the expensive work.** Per-chat token buckets reject flooding chats before a single download starts. Policy rejections answer `200` so Telegram doesn't retry them.
 - **Bots stay private.** The gateway is the only internet-facing component. Downstream bots listen on the private network, so a forged update can't bypass admission.
 - **Observable by default.** JSON structured logs carry `bot_id`, `update_id`, kind, chat, downstream status, and latency on every forwarded update. `RUST_LOG=debug` when you need the details.
-- **Small and boring.** One static binary, no database, no control plane. Around 6 MB RSS at idle.
+- **Small and boring.** One static binary with an embedded SQLite outbox, no external database, no control plane. Around 6 MB RSS at idle.
 
 ## Quick start
 
@@ -58,19 +59,38 @@ machine. Bots without a token are skipped.
 | ------ | ------------------- | ------------------------------------------- |
 | `POST` | `/webhooks/:bot_id` | Telegram webhook ingress for bot `:bot_id`. |
 | `GET`  | `/healthz`          | Liveness probe.                             |
-| `GET`  | `/readyz`           | Readiness probe.                            |
+| `GET`  | `/readyz`           | Readiness probe (checks the outbox database). |
+| `GET`  | `/outbox/dead`      | Dead-lettered updates (admin token only).   |
 
 ### Webhook response contract
 
 | Status | Meaning                                                        |
 | ------ | -------------------------------------------------------------- |
-| `200`  | Update accepted and forwarded, or rejected by admission policy. |
+| `200`  | Update accepted into the outbox, duplicate, or rejected by admission policy. |
 | `400`  | Malformed update (missing `update_id`).                        |
 | `401`  | Wrong or missing webhook secret.                               |
 | `404`  | Unknown bot id.                                                |
-| `502`  | Downstream bot unreachable or returned an error (Telegram will retry). |
+| `503`  | Outbox unavailable (Telegram will retry).                      |
 
-Forwarded requests carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers so the downstream bot can correlate.
+Accepted updates are delivered to the downstream bot asynchronously with
+retries; a downed bot no longer produces a `502`. Forwarded requests carry
+`X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers so the downstream
+bot can correlate and deduplicate (`update_id` is unique per bot, and
+delivery is at-least-once).
+
+### Dead letters
+
+Updates that exhaust their retries land in the dead-letter trail. With an
+`[admin]` token configured, list them:
+
+```sh
+curl -H "Authorization: Bearer <admin token>" \
+  localhost:8080/outbox/dead
+# [{"bot_id":"demo","update_id":7,"attempts":25,"last_error":"...","created_at":...}]
+```
+
+Add `?bot_id=demo` to filter. The route is not registered at all without
+`[admin]`.
 
 ## Configuration
 
@@ -78,6 +98,13 @@ Forwarded requests carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` heade
 
 ```toml
 listen = "127.0.0.1:8080"
+
+[outbox]
+path = "outbox.db"          # SQLite file holding queued updates
+max_attempts = 25           # retries before dead-lettering
+
+# [admin]
+# token = "a-long-random-value"  # guards GET /outbox/dead
 
 [[bots]]
 id = "mediadownloadbot"
@@ -89,6 +116,11 @@ rate_limit_per_minute = 30
 | Key                          | Description                                                 |
 | ---------------------------- | ----------------------------------------------------------- |
 | `listen`                     | Socket address to bind (default `127.0.0.1:8080`).           |
+| `outbox.path`                | SQLite file for the durable outbox (default `outbox.db`).   |
+| `outbox.max_attempts`         | Delivery retries before dead-lettering (default `25`).      |
+| `outbox.poll_interval_ms`    | Retry sweep interval (default `1000`).                      |
+| `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30). |
+| `admin.token`                | Bearer token for `/outbox/*`. Route absent when unset.       |
 | `bots[].id`                  | Public id used in the webhook route. Must be unique.         |
 | `bots[].downstream_url`      | Internal bot endpoint receiving the forwarded update.       |
 | `bots[].webhook_secret`      | Compared in constant time against Telegram's secret header. |

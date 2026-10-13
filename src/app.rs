@@ -1,18 +1,20 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use axum::{
     Router,
     http::StatusCode,
     routing::{get, post},
 };
+use tokio::sync::Notify;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::{
     config::{BotConfig, Config},
+    outbox::{Dispatcher, Store},
     policy::AdmissionPolicy,
     routes,
 };
@@ -23,6 +25,9 @@ pub struct AppState {
     pub bots: Arc<Vec<BotConfig>>,
     pub policy: AdmissionPolicy,
     pub http: reqwest::Client,
+    pub store: Store,
+    pub notifies: Arc<HashMap<String, Arc<Notify>>>,
+    pub admin_token: Option<String>,
 }
 
 impl AppState {
@@ -31,19 +36,55 @@ impl AppState {
     }
 }
 
-/// Build the router. Middleware is layered outside-in, in the order a
-/// request meets it: tracing, body limit, timeout, concurrency guard.
-pub fn build_router(config: Config) -> Router {
+/// Everything `build_router` produces: the router plus the background
+/// workers the caller must spawn.
+pub struct BuiltApp {
+    pub router: Router,
+    pub dispatchers: Vec<Arc<Dispatcher>>,
+    pub store: Store,
+}
+
+/// Build the router and the per-bot outbox dispatchers. Middleware is
+/// layered outside-in, in the order a request meets it: tracing, body
+/// limit, timeout, concurrency guard.
+pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
+    let store = Store::open(&config.outbox.path)
+        .await
+        .context("failed to open outbox database")?;
+    let http = reqwest::Client::new();
+
+    let mut notifies = HashMap::new();
+    let mut dispatchers = Vec::new();
+    for bot in &config.bots {
+        let notify = Arc::new(Notify::new());
+        notifies.insert(bot.id.clone(), notify.clone());
+        dispatchers.push(Arc::new(Dispatcher::new(
+            store.clone(),
+            http.clone(),
+            bot.clone(),
+            config.outbox.max_attempts,
+            Duration::from_millis(config.outbox.poll_interval_ms),
+            notify,
+        )));
+    }
+
     let state = AppState {
         policy: AdmissionPolicy::new(&config.bots),
         bots: Arc::new(config.bots),
-        http: reqwest::Client::new(),
+        http,
+        store: store.clone(),
+        notifies: Arc::new(notifies),
+        admin_token: config.admin.map(|a| a.token),
     };
 
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
-        .route("/webhooks/{bot_id}", post(routes::webhook::webhook_handler))
+        .route("/webhooks/{bot_id}", post(routes::webhook::webhook_handler));
+    if state.admin_token.is_some() {
+        router = router.route("/outbox/dead", get(routes::admin::dead_letters));
+    }
+    let router = router
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         // A gateway-side timeout means "retry later" to Telegram.
@@ -52,5 +93,11 @@ pub fn build_router(config: Config) -> Router {
             Duration::from_secs(30),
         ))
         .layer(ConcurrencyLimitLayer::new(512))
-        .with_state(state)
+        .with_state(state);
+
+    Ok(BuiltApp {
+        router,
+        dispatchers,
+        store,
+    })
 }

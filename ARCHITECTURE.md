@@ -69,18 +69,22 @@ Trust boundaries:
 1. Authenticate   verify X-Telegram-Bot-Api-Secret-Token in constant time
 2. Adapt          extract (update_id, kind, chat_key) from the raw JSON
 3. Admit          per-chat token bucket; rejections answer 200
-4. Forward        POST the raw body to downstream_url (25s timeout)
-5. Observe        structured log: bot_id, update_id, kind, chat, status, latency
+4. Persist        INSERT OR IGNORE into the outbox (dedupe on update_id)
+5. Observe        structured log: bot_id, update_id, kind, chat
 ```
+
+Delivery to the downstream bot happens asynchronously (see section 6).
+The ingress path answers 200 as soon as the update is durable.
 
 Response contract with Telegram:
 
 | Outcome                          | Status | Rationale                                  |
 | -------------------------------- | ------ | ------------------------------------------ |
-| Forwarded (downstream 2xx)       | 200    | Normal delivery.                           |
+| Accepted into the outbox         | 200    | Normal path; delivery is async.            |
+| Duplicate update_id              | 200    | Already queued; Telegram redelivered.      |
 | Rejected by admission policy     | 200    | Telegram must not retry a policy decision. |
 | Malformed update / bad secret / unknown bot | 4xx | Client error; retrying won't help.  |
-| Downstream unreachable or 5xx    | 502    | Retryable; Telegram will redeliver.        |
+| Outbox unavailable               | 503    | Retryable; Telegram will redeliver.        |
 
 ## 5. Components
 
@@ -88,10 +92,36 @@ Response contract with Telegram:
 | ----------------- | --------------------------------------------------------------------- |
 | `config`          | TOML loading and validation. Fails fast on bad config.                |
 | `app`             | Router assembly, shared `AppState`, middleware stack.                 |
-| `routes::health`  | `/healthz` (liveness) and `/readyz` (readiness) probes.               |
-| `routes::webhook` | The ingress handler: authenticate → adapt → admit → forward → log.    |
+| `routes::health`  | `/healthz` (liveness) and `/readyz` (readiness, checks the outbox).   |
+| `routes::webhook` | The ingress handler: authenticate → adapt → admit → persist → log.    |
+| `routes::admin`   | `/outbox/dead`: dead-letter listing, bearer-token guarded.            |
+| `outbox::store`   | SQLite persistence: insert, atomic claim, retry bookkeeping, prune.    |
+| `outbox::dispatch`| Per-bot delivery tasks with exponential-backoff retries; janitor.     |
 | `telegram`        | Adapter: raw Telegram JSON → routing envelope.                        |
 | `policy`          | Per-bot, per-chat token-bucket admission control.                     |
+
+## 6. Durability: the outbox
+
+An accepted update is a promise. The gateway keeps it in SQLite (WAL mode)
+before answering Telegram, so a crashed or downed bot loses nothing.
+
+- **Ingest** writes the raw JSON with `INSERT OR IGNORE` on
+  `(bot_id, update_id)`; a Telegram redelivery is a no-op.
+- **Delivery** runs one task per bot. It claims due rows atomically
+  (`UPDATE ... RETURNING`, bumping `attempts`), forwards each downstream
+  with the 25s timeout and the gateway correlation headers, then marks the
+  row `delivered` or schedules the next attempt.
+- **Retries** back off exponentially (5s doubling, ±20% jitter, capped at
+  1h). After `outbox.max_attempts` failures the row is dead-lettered with
+  its last error; `GET /outbox/dead` (admin token) lists the trail.
+- **Crashes**: on open, rows left `in_flight` are requeued as `pending`.
+  Delivery is at-least-once; downstream bots dedupe on `update_id`.
+- **Hygiene**: a janitor prunes delivered rows after
+  `outbox.delivered_retention_days` (default 7) and dead letters after
+  30 days.
+- **Ordering**: each bot's dispatcher works sequentially, so per-bot order
+  is preserved in the common case; retries can still reorder around a
+  poisoned update. Cross-bot ordering is not guaranteed.
 
 One crate, one binary.
 
@@ -155,12 +185,13 @@ and never stop the gateway; bots without a token are skipped.
 
 ## 10. Failure handling
 
-- Downstream timeout (25s) is shorter than the gateway timeout (30s), so the
-  gateway always owns the response to Telegram.
-- A 502 tells Telegram to retry; a policy rejection answers 200 so abusive
+- The outbox is the durability boundary: once Telegram gets a 200, the
+  update survives gateway restarts and downstream outages.
+- A 503 tells Telegram to retry; a policy rejection answers 200 so abusive
   traffic is not amplified by retries.
-- `ConcurrencyLimitLayer` (512) bounds in-flight work; excess connections
-  wait instead of piling onto the bot.
+- Delivery is at-least-once; downstream bots dedupe on `update_id`.
+- `ConcurrencyLimitLayer` (512) bounds in-flight ingress work; excess
+  connections wait instead of piling onto the database.
 - Panics in a handler cannot take down the process: each connection is an
   independent Tokio task.
 
@@ -168,15 +199,13 @@ and never stop the gateway; bots without a token are skipped.
 
 Single static binary. Recommended topology: TLS edge → telegateway →
 bots, all on one private container network. Without an edge, the gateway
-terminates TLS itself from the `[tls]` config section. The gateway is
-stateless today (rate-limiter state is in-memory and safe to lose), so it
-can be replicated behind the edge once needed.
+terminates TLS itself from the `[tls]` config section. The gateway keeps
+local state in the outbox SQLite file (bind-mounted or on a volume in
+containers); rate-limiter state is in-memory and safe to lose. Single-node
+by design: replicating the gateway would need shared outbox storage.
 
 ## 12. Roadmap
 
-1. **Durable outbox** — persist accepted updates, acknowledge Telegram
-   immediately, deliver asynchronously with bounded retries and a dead-letter
-   trail.
-2. **Replay API** — re-deliver a recorded update to a bot for debugging.
-3. **OpenTelemetry export** — traces and metrics to a collector.
-4. **Circuit breaker** — per-bot open/half-open/closed state with fast-fail.
+1. **Replay API** — re-deliver a recorded update to a bot for debugging.
+2. **OpenTelemetry export** — traces and metrics to a collector.
+3. **Circuit breaker** — per-bot open/half-open/closed state with fast-fail.

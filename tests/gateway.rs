@@ -6,16 +6,49 @@ use axum::{
 };
 use serde_json::json;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use telegateway::{app, config::Config};
 use tower::ServiceExt;
 
 const SECRET: &str = "test-secret";
+const ADMIN_SECRET: &str = "admin-secret";
+
+fn temp_db() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir()
+        .join(format!(
+            "telegateway-gateway-test-{}-{n}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
 
 fn test_config(downstream_url: String, rate_limit_per_minute: u32) -> Config {
+    test_config_full(downstream_url, rate_limit_per_minute, false)
+}
+
+fn test_config_full(
+    downstream_url: String,
+    rate_limit_per_minute: u32,
+    with_admin: bool,
+) -> Config {
+    let db = temp_db();
+    let admin = if with_admin {
+        format!("[admin]\ntoken = \"{ADMIN_SECRET}\"\n")
+    } else {
+        String::new()
+    };
     let toml = format!(
         r#"
 listen = "127.0.0.1:0"
 
+[outbox]
+path = "{db}"
+
+{admin}
 [[bots]]
 id = "demo"
 downstream_url = "{downstream_url}"
@@ -23,10 +56,8 @@ webhook_secret = "{SECRET}"
 rate_limit_per_minute = {rate_limit_per_minute}
 "#
     );
-    let config: Config = toml::from_str(&toml).unwrap();
     // Reuse the same validation the binary applies.
-    telegateway::config::load_from_str(&toml).unwrap();
-    config
+    telegateway::config::load_from_str(&toml).unwrap()
 }
 
 fn authed(path: &str, body: serde_json::Value) -> Request<Body> {
@@ -74,10 +105,13 @@ async fn stub_downstream() -> (String, tokio::sync::mpsc::UnboundedReceiver<Stri
 #[tokio::test]
 async fn health_endpoints_answer_ok() {
     let (downstream, _rx) = stub_downstream().await;
-    let router = app::build_router(test_config(downstream, 30));
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
 
     for path in ["/healthz", "/readyz"] {
-        let resp = router
+        let resp = built
+            .router
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
@@ -89,9 +123,12 @@ async fn health_endpoints_answer_ok() {
 #[tokio::test]
 async fn unknown_bot_is_404() {
     let (downstream, _rx) = stub_downstream().await;
-    let router = app::build_router(test_config(downstream, 30));
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
 
-    let resp = router
+    let resp = built
+        .router
         .oneshot(authed("/webhooks/nope", update(1, 7)))
         .await
         .unwrap();
@@ -101,7 +138,9 @@ async fn unknown_bot_is_404() {
 #[tokio::test]
 async fn bad_secret_is_401() {
     let (downstream, _rx) = stub_downstream().await;
-    let router = app::build_router(test_config(downstream, 30));
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
 
     let req = Request::builder()
         .method("POST")
@@ -110,46 +149,87 @@ async fn bad_secret_is_401() {
         .header("x-telegram-bot-api-secret-token", "wrong")
         .body(Body::from(update(1, 7).to_string()))
         .unwrap();
-    let resp = router.oneshot(req).await.unwrap();
+    let resp = built.router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn forwards_update_to_downstream() {
+async fn accepted_update_is_persisted_then_forwarded() {
     let (downstream, mut rx) = stub_downstream().await;
-    let router = app::build_router(test_config(downstream, 30));
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
 
-    let resp = router
+    // Ingest answers 200 once the update is persisted, without waiting
+    // for downstream.
+    let resp = built
+        .router
+        .clone()
         .oneshot(authed("/webhooks/demo", update(99, 7)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert!(rx.try_recv().is_err(), "delivery is asynchronous");
 
+    built.dispatchers[0].drain_once().await;
     let forwarded = rx.recv().await.expect("downstream should be called");
     let body: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
     assert_eq!(body["update_id"], 99);
+    assert_eq!(
+        built.store.status_of("demo", 99).await.unwrap(),
+        "delivered"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_update_is_accepted_once() {
+    let (downstream, mut rx) = stub_downstream().await;
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let resp = built
+            .router
+            .clone()
+            .oneshot(authed("/webhooks/demo", update(5, 7)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    built.dispatchers[0].drain_once().await;
+    assert!(rx.recv().await.is_some());
+    assert!(
+        rx.try_recv().is_err(),
+        "duplicate must not be delivered twice"
+    );
 }
 
 #[tokio::test]
 async fn rate_limited_updates_answer_200_without_forwarding() {
     let (downstream, mut rx) = stub_downstream().await;
     // Quota of 1 per minute: the second update from the same chat is rejected.
-    let router = app::build_router(test_config(downstream, 1));
+    let built = app::build_router(test_config(downstream, 1)).await.unwrap();
 
-    let first = router
+    let first = built
+        .router
         .clone()
         .oneshot(authed("/webhooks/demo", update(1, 7)))
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
+    built.dispatchers[0].drain_once().await;
     assert!(rx.recv().await.is_some());
 
-    let second = router
+    let second = built
+        .router
         .oneshot(authed("/webhooks/demo", update(2, 7)))
         .await
         .unwrap();
     // 200, not 429: Telegram must not retry a policy rejection.
     assert_eq!(second.status(), StatusCode::OK);
+    built.dispatchers[0].drain_once().await;
     assert!(
         rx.try_recv().is_err(),
         "rate-limited update must not reach downstream"
@@ -157,14 +237,70 @@ async fn rate_limited_updates_answer_200_without_forwarding() {
 }
 
 #[tokio::test]
-async fn downstream_outage_is_502() {
+async fn downstream_outage_is_accepted_for_retry() {
     // Nothing listens on this port.
-    let config = test_config("http://127.0.0.1:1/webhook".to_owned(), 30);
-    let router = app::build_router(config);
+    let built = app::build_router(test_config("http://127.0.0.1:1/webhook".to_owned(), 30))
+        .await
+        .unwrap();
 
-    let resp = router
+    let resp = built
+        .router
         .oneshot(authed("/webhooks/demo", update(1, 7)))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    // 200, not 502: the update is persisted and retried in the background.
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(built.store.status_of("demo", 1).await.unwrap(), "pending");
+}
+
+#[tokio::test]
+async fn dead_letters_require_admin_token() {
+    let (downstream, _rx) = stub_downstream().await;
+    let built = app::build_router(test_config_full(downstream, 30, true))
+        .await
+        .unwrap();
+
+    let get = |token: Option<&str>| {
+        let mut builder = Request::builder().method("GET").uri("/outbox/dead");
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+
+    let no_token = built.router.clone().oneshot(get(None)).await.unwrap();
+    assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong = built
+        .router
+        .clone()
+        .oneshot(get(Some("wrong")))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    let ok = built.router.oneshot(get(Some(ADMIN_SECRET))).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn dead_letters_route_missing_without_admin() {
+    let (downstream, _rx) = stub_downstream().await;
+    let built = app::build_router(test_config(downstream, 30))
+        .await
+        .unwrap();
+
+    let resp = built
+        .router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/outbox/dead")
+                .header("authorization", format!("Bearer {ADMIN_SECRET}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

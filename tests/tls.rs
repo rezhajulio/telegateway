@@ -31,9 +31,14 @@ fn free_port() -> u16 {
 async fn serves_https_when_tls_configured() {
     let (cert_path, key_path, dir) = self_signed_pems();
     let port = free_port();
+    let db = std::env::temp_dir().join(format!("telegateway-tls-outbox-{}.db", std::process::id()));
+    let db = db.to_str().unwrap();
     let toml = format!(
         r#"
 listen = "127.0.0.1:{port}"
+
+[outbox]
+path = "{db}"
 
 [tls]
 cert_path = "{cert_path}"
@@ -46,7 +51,7 @@ webhook_secret = "s3cret"
 "#
     );
     let cfg = config::load_from_str(&toml).unwrap();
-    let router = app::build_router(cfg.clone());
+    let router = app::build_router(cfg.clone()).await.unwrap().router;
     let tls = cfg.tls.clone().unwrap();
 
     let rustls_config =
