@@ -8,6 +8,13 @@ listen = "127.0.0.1:8080"
 # path = "outbox.db"
 # max_attempts = 25
 
+# Circuit breaker per downstream bot: after this many consecutive
+# failures, delivery pauses for cooldown_secs, then a probe goes out.
+# [circuit_breaker]
+# failure_threshold = 5
+# cooldown_secs = 60
+# max_cooldown_secs = 600
+
 # Admin API: guards GET /outbox/dead (dead-letter listing). The route is
 # not registered without this section.
 # [admin]

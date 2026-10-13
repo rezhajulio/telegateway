@@ -97,6 +97,7 @@ Response contract with Telegram:
 | `routes::admin`   | `/outbox` listing and `/outbox/replay`, bearer-token guarded.          |
 | `outbox::store`   | SQLite persistence: insert, atomic claim, retry bookkeeping, prune.    |
 | `outbox::dispatch`| Per-bot delivery tasks with exponential-backoff retries; janitor.     |
+| `outbox::breaker` | Per-bot circuit breaker: fast-fail while downstream is down.          |
 | `telegram`        | Adapter: raw Telegram JSON → routing envelope.                        |
 | `policy`          | Per-bot, per-chat token-bucket admission control.                     |
 
@@ -116,6 +117,16 @@ before answering Telegram, so a crashed or downed bot loses nothing.
   its last error; `GET /outbox/dead` (admin token) lists the trail.
 - **Crashes**: on open, rows left `in_flight` are requeued as `pending`.
   Delivery is at-least-once; downstream bots dedupe on `update_id`.
+- **Circuit breaker**: each bot has an in-memory breaker (closed → open →
+  half-open). After `circuit_breaker.failure_threshold` consecutive
+  failures the dispatcher stops attempting delivery entirely instead of
+  burning retry attempts against a dead endpoint. After
+  `circuit_breaker.cooldown_secs` one probe goes out: success closes the
+  breaker and wakes the bot's pending rows for immediate drain (recovery
+  is detected within one cooldown, not one backoff cycle); failure
+  reopens it with a doubled cooldown, capped at `max_cooldown_secs`.
+  State is in-memory like the rate limiter — a restart simply starts
+  closed and re-trips if the bot is still down.
 - **Hygiene**: a janitor prunes delivered rows after
   `outbox.delivered_retention_days` (default 7) and dead letters after
   30 days.
@@ -207,4 +218,3 @@ by design: replicating the gateway would need shared outbox storage.
 ## 12. Roadmap
 
 1. **OpenTelemetry export** — traces and metrics to a collector.
-2. **Circuit breaker** — per-bot open/half-open/closed state with fast-fail.

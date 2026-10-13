@@ -79,6 +79,7 @@ async fn register_all_skips_bots_without_token() {
         bots: vec![test_bot(), no_token],
         tls: None,
         outbox: Default::default(),
+        circuit_breaker: Default::default(),
         admin: None,
     };
 

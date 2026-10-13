@@ -5,9 +5,11 @@
 //! Delivery is at-least-once; downstream bots dedupe on `update_id`.
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod breaker;
 pub mod dispatch;
 mod store;
 
+pub use breaker::{CircuitBreaker, Decision};
 pub use dispatch::{Dispatcher, deliver_payload};
 pub use store::{OUTBOX_STATUSES, OutboxEntry, OutboxRow, Store};
 

@@ -31,6 +31,9 @@ pub struct Config {
     /// asynchronously with retries.
     #[serde(default)]
     pub outbox: OutboxConfig,
+    /// Circuit breaker per downstream bot.
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
     /// Admin API guard. When absent, admin routes are not registered.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
@@ -117,6 +120,42 @@ fn default_poll_interval_ms() -> u64 {
 
 fn default_delivered_retention_days() -> u64 {
     7
+}
+
+/// Circuit breaker settings, applied per downstream bot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive delivery failures that trip the breaker.
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Seconds before a half-open probe goes out.
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Cap for the doubling cooldown after failed probes.
+    #[serde(default = "default_max_cooldown_secs")]
+    pub max_cooldown_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: default_failure_threshold(),
+            cooldown_secs: default_cooldown_secs(),
+            max_cooldown_secs: default_max_cooldown_secs(),
+        }
+    }
+}
+
+fn default_failure_threshold() -> u32 {
+    5
+}
+
+fn default_cooldown_secs() -> u64 {
+    60
+}
+
+fn default_max_cooldown_secs() -> u64 {
+    600
 }
 
 /// Admin API settings. The token guards the `/outbox/*` routes.
@@ -207,6 +246,18 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.outbox.max_attempts == 0 {
         return Err(ConfigError::Validation(
             "`outbox.max_attempts` must be at least 1".to_owned(),
+        ));
+    }
+
+    if config.circuit_breaker.failure_threshold == 0 {
+        return Err(ConfigError::Validation(
+            "`circuit_breaker.failure_threshold` must be at least 1".to_owned(),
+        ));
+    }
+
+    if config.circuit_breaker.cooldown_secs == 0 {
+        return Err(ConfigError::Validation(
+            "`circuit_breaker.cooldown_secs` must be at least 1".to_owned(),
         ));
     }
 

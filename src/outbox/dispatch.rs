@@ -1,16 +1,17 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Asynchronous delivery: one task per bot drains its outbox rows,
-//! forwarding each downstream with retries. A separate janitor prunes
-//! old delivered and dead rows.
-use std::sync::Arc;
+//! forwarding each downstream with retries. A circuit breaker per bot
+//! stops delivery attempts entirely while the downstream is known down.
+//! A separate janitor prunes old delivered and dead rows.
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
 use crate::config::BotConfig;
 
-use super::{OutboxRow, Store, now_millis};
+use super::{CircuitBreaker, Decision, OutboxRow, Store, now_millis};
 
 /// How many rows one drain pass claims at most.
 const CLAIM_LIMIT: i64 = 32;
@@ -49,6 +50,7 @@ pub struct Dispatcher {
     max_attempts: u32,
     poll_interval: Duration,
     notify: Arc<Notify>,
+    breaker: Mutex<CircuitBreaker>,
 }
 
 impl Dispatcher {
@@ -59,6 +61,7 @@ impl Dispatcher {
         max_attempts: u32,
         poll_interval: Duration,
         notify: Arc<Notify>,
+        breaker: CircuitBreaker,
     ) -> Self {
         Self {
             store,
@@ -67,14 +70,26 @@ impl Dispatcher {
             max_attempts,
             poll_interval,
             notify,
+            breaker: Mutex::new(breaker),
         }
     }
 
+    fn decide(&self) -> Decision {
+        self.breaker
+            .lock()
+            .expect("breaker mutex poisoned")
+            .decide(Instant::now())
+    }
+
     /// Process every currently-due row once, sequentially. Returns the
-    /// number of rows handled.
+    /// number of rows handled. Stops early (requeueing unattempted rows)
+    /// when the circuit breaker opens mid-drain.
     pub async fn drain_once(&self) -> usize {
         let mut done = 0;
         loop {
+            if !matches!(self.decide(), Decision::Allow) {
+                break;
+            }
             let rows = match self.store.claim_due(&self.bot.id, CLAIM_LIMIT).await {
                 Ok(rows) => rows,
                 Err(e) => {
@@ -85,7 +100,19 @@ impl Dispatcher {
             if rows.is_empty() {
                 break;
             }
-            for row in rows {
+            let mut rows = rows.into_iter().peekable();
+            while let Some(row) = rows.next() {
+                if !matches!(self.decide(), Decision::Allow) {
+                    let ids: Vec<i64> = std::iter::once(row.id).chain(rows.map(|r| r.id)).collect();
+                    if let Err(e) = self.store.requeue(&ids).await {
+                        tracing::error!(
+                            bot_id = %self.bot.id,
+                            error = %e,
+                            "failed to requeue rows after breaker opened"
+                        );
+                    }
+                    return done;
+                }
                 self.deliver_row(&row).await;
                 done += 1;
             }
@@ -97,6 +124,10 @@ impl Dispatcher {
         let started = Instant::now();
         match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
             Ok(_) => {
+                self.breaker
+                    .lock()
+                    .expect("breaker mutex poisoned")
+                    .on_success();
                 if let Err(e) = self.store.mark_delivered(row.id).await {
                     tracing::error!(
                         bot_id = %self.bot.id,
@@ -113,6 +144,10 @@ impl Dispatcher {
                 );
             }
             Err(error) => {
+                self.breaker
+                    .lock()
+                    .expect("breaker mutex poisoned")
+                    .on_failure(Instant::now());
                 match self
                     .store
                     .mark_failed(row.id, &error, self.max_attempts)
@@ -144,13 +179,90 @@ impl Dispatcher {
         }
     }
 
-    /// Drain due rows, then wait for new work or the next retry sweep.
+    /// Send one probe delivery while half-open. On success the breaker
+    /// closes and the bot's pending rows are woken for immediate drain;
+    /// on failure the breaker reopens with a doubled cooldown.
+    pub async fn probe(&self) {
+        let rows = match self.store.claim_due(&self.bot.id, 1).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(bot_id = %self.bot.id, error = %e, "outbox claim failed");
+                return;
+            }
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return;
+        };
+        tracing::info!(
+            bot_id = %self.bot.id,
+            update_id = row.update_id,
+            "circuit breaker probe"
+        );
+        match deliver_payload(&self.http, &self.bot, row.update_id, &row.payload).await {
+            Ok(_) => {
+                self.breaker
+                    .lock()
+                    .expect("breaker mutex poisoned")
+                    .on_success();
+                if let Err(e) = self.store.mark_delivered(row.id).await {
+                    tracing::error!(
+                        bot_id = %self.bot.id,
+                        update_id = row.update_id,
+                        error = %e,
+                        "failed to mark update delivered"
+                    );
+                }
+                if let Err(e) = self.store.wake_pending(&self.bot.id).await {
+                    tracing::error!(
+                        bot_id = %self.bot.id,
+                        error = %e,
+                        "failed to wake pending rows after recovery"
+                    );
+                }
+                self.notify.notify_one();
+            }
+            Err(error) => {
+                self.breaker
+                    .lock()
+                    .expect("breaker mutex poisoned")
+                    .on_failure(Instant::now());
+                if let Err(e) = self
+                    .store
+                    .mark_failed(row.id, &error, self.max_attempts)
+                    .await
+                {
+                    tracing::error!(
+                        bot_id = %self.bot.id,
+                        update_id = row.update_id,
+                        error = %e,
+                        "failed to record delivery failure"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Run the delivery loop: drain while the breaker allows, sleep while
+    /// it denies, probe while half-open.
     pub async fn run(self: Arc<Self>) {
         loop {
-            self.drain_once().await;
-            tokio::select! {
-                () = self.notify.notified() => {},
-                () = tokio::time::sleep(self.poll_interval) => {},
+            match self.decide() {
+                Decision::Allow => {
+                    self.drain_once().await;
+                    tokio::select! {
+                        () = self.notify.notified() => {},
+                        () = tokio::time::sleep(self.poll_interval) => {},
+                    }
+                }
+                Decision::Deny { retry_after } => {
+                    tokio::select! {
+                        () = self.notify.notified() => {},
+                        () = tokio::time::sleep(retry_after) => {},
+                    }
+                }
+                Decision::Probe => {
+                    self.probe().await;
+                }
             }
         }
     }

@@ -112,6 +112,9 @@ rate_limit_per_minute = 30
 | `outbox.max_attempts`         | Delivery retries before dead-lettering (default `25`).      |
 | `outbox.poll_interval_ms`    | Retry sweep interval (default `1000`).                      |
 | `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30). |
+| `circuit_breaker.failure_threshold` | Consecutive failures that trip the breaker (default `5`). |
+| `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`). |
+| `circuit_breaker.max_cooldown_secs` | Cap for the doubling cooldown (default `600`). |
 | `admin.token`                | Bearer token for `/outbox/*`. Route absent when unset.       |
 | `bots[].id`                  | Public id used in the webhook route. Must be unique.         |
 | `bots[].downstream_url`      | Internal bot endpoint receiving the forwarded update.       |

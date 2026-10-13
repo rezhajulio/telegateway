@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use telegateway::{
     config::BotConfig,
-    outbox::{Dispatcher, Store},
+    outbox::{CircuitBreaker, Dispatcher, Store},
 };
 use tokio::sync::Notify;
 
@@ -35,15 +35,26 @@ fn test_bot(downstream_url: String) -> BotConfig {
     }
 }
 
-fn dispatcher(store: Store, bot: BotConfig, max_attempts: u32) -> Dispatcher {
+fn dispatcher_with_breaker(
+    store: Store,
+    bot: BotConfig,
+    max_attempts: u32,
+    failure_threshold: u32,
+    cooldown: Duration,
+) -> Dispatcher {
     Dispatcher::new(
         store,
         reqwest::Client::new(),
-        bot,
+        bot.clone(),
         max_attempts,
         Duration::from_millis(50),
         Arc::new(Notify::new()),
+        CircuitBreaker::new(bot.id.clone(), failure_threshold, cooldown, cooldown * 4),
     )
+}
+
+fn dispatcher(store: Store, bot: BotConfig, max_attempts: u32) -> Dispatcher {
+    dispatcher_with_breaker(store, bot, max_attempts, 10_000, Duration::from_secs(3600))
 }
 
 /// Stub downstream bot: fails the first `fail_times` requests with 500,
@@ -223,6 +234,117 @@ async fn prune_drops_old_rows() {
     // A cutoff in the future prunes it.
     store.prune(i64::MAX, i64::MAX).await.unwrap();
     assert!(store.status_of("demo", 1).await.is_err());
+}
+
+#[tokio::test]
+async fn wake_pending_clears_backoff() {
+    let store = Store::open(&temp_db()).await.unwrap();
+    store.insert("demo", 1, "{}").await.unwrap();
+    let rows = store.claim_due("demo", 32).await.unwrap();
+    store.mark_failed(rows[0].id, "x", 10).await.unwrap();
+    assert!(store.claim_due("demo", 32).await.unwrap().is_empty());
+
+    store.wake_pending("demo").await.unwrap();
+    assert_eq!(store.claim_due("demo", 32).await.unwrap().len(), 1);
+}
+
+/// Stub downstream that counts every request it receives.
+async fn stub_counting_downstream(
+    fail_times: usize,
+) -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    Arc<AtomicU64>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let counter = Arc::new(AtomicU64::new(0));
+    let router = axum::Router::new().route(
+        "/webhook",
+        axum::routing::post({
+            let counter = counter.clone();
+            move |body: String| {
+                let tx = tx.clone();
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.send(body);
+                    if counter.load(Ordering::SeqCst) <= fail_times as u64 {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (format!("http://{addr}/webhook"), rx, counter)
+}
+
+#[tokio::test]
+async fn breaker_opens_and_fast_fails_without_burning_attempts() {
+    let (downstream, _rx, hits) = stub_counting_downstream(usize::MAX).await;
+    let store = Store::open(&temp_db()).await.unwrap();
+    for id in 1..=3 {
+        store.insert("demo", id, "{}").await.unwrap();
+    }
+
+    // Threshold 2, cooldown far in the future: no probe during this test.
+    let d = dispatcher_with_breaker(
+        store.clone(),
+        test_bot(downstream),
+        10,
+        2,
+        Duration::from_secs(3600),
+    );
+    assert_eq!(d.drain_once().await, 2);
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "third row never attempted");
+
+    // The unattempted row is requeued as pending with its single claim
+    // counted, not dead-lettered or lost.
+    assert_eq!(store.status_of("demo", 3).await.unwrap(), "pending");
+    // Breaker still open: another drain attempts nothing.
+    assert_eq!(d.drain_once().await, 0);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn breaker_probe_recovers_and_wakes_queue() {
+    let (downstream, _rx, hits) = stub_counting_downstream(1).await;
+    let store = Store::open(&temp_db()).await.unwrap();
+    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 2, "{}").await.unwrap();
+
+    let d = dispatcher_with_breaker(
+        store.clone(),
+        test_bot(downstream),
+        10,
+        1,
+        Duration::from_millis(100),
+    );
+    // First row fails -> breaker opens immediately; second row requeued.
+    assert_eq!(d.drain_once().await, 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(store.status_of("demo", 2).await.unwrap(), "pending");
+
+    // Cooldown elapses; the failed row's backoff has not, so make it due
+    // the way time would.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    store.force_due_by_update("demo", 1).await.unwrap();
+
+    // Probe succeeds: breaker closes, row delivered, queue woken.
+    d.probe().await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(store.status_of("demo", 1).await.unwrap(), "delivered");
+
+    // The requeued row is now due without waiting out its backoff.
+    assert_eq!(d.drain_once().await, 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    assert_eq!(store.status_of("demo", 2).await.unwrap(), "delivered");
 }
 
 #[tokio::test]

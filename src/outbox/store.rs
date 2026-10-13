@@ -250,6 +250,36 @@ impl Store {
         Ok(())
     }
 
+    /// Requeue claimed rows as pending without touching their attempt
+    /// counters. Used when the circuit breaker opens mid-drain: the rows
+    /// were picked up but never attempted.
+    pub async fn requeue(&self, ids: &[i64]) -> Result<(), sqlx::Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut builder =
+            sqlx::QueryBuilder::new("UPDATE outbox SET status = 'pending' WHERE id IN (");
+        let mut separated = builder.separated(", ");
+        for id in ids {
+            separated.push_bind(*id);
+        }
+        separated.push_unseparated(")");
+        builder.build().execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Clear backoff timers for a bot's pending rows, so they become due
+    /// immediately. Used on circuit-breaker recovery.
+    pub async fn wake_pending(&self, bot_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE outbox SET next_attempt_at = NULL WHERE bot_id = ? AND status = 'pending'",
+        )
+        .bind(bot_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Test helper: make a row due immediately, bypassing backoff.
     pub async fn force_due(&self, id: i64) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE outbox SET next_attempt_at = 0 WHERE id = ?")

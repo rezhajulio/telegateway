@@ -14,7 +14,7 @@ use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::Tra
 
 use crate::{
     config::{BotConfig, Config},
-    outbox::{Dispatcher, Store},
+    outbox::{CircuitBreaker, Dispatcher, Store},
     policy::AdmissionPolicy,
     routes,
 };
@@ -58,6 +58,12 @@ pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
     for bot in &config.bots {
         let notify = Arc::new(Notify::new());
         notifies.insert(bot.id.clone(), notify.clone());
+        let breaker = CircuitBreaker::new(
+            bot.id.clone(),
+            config.circuit_breaker.failure_threshold,
+            Duration::from_secs(config.circuit_breaker.cooldown_secs),
+            Duration::from_secs(config.circuit_breaker.max_cooldown_secs),
+        );
         dispatchers.push(Arc::new(Dispatcher::new(
             store.clone(),
             http.clone(),
@@ -65,6 +71,7 @@ pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
             config.outbox.max_attempts,
             Duration::from_millis(config.outbox.poll_interval_ms),
             notify,
+            breaker,
         )));
     }
 
