@@ -172,7 +172,8 @@ cargo build --release
 
 Prebuilt binaries are attached to each [GitHub Release](https://github.com/rezhajulio/telegateway/releases);
 tagged releases are also published to crates.io (`cargo install telegateway`).
-See [docs/RELEASING.md](docs/RELEASING.md) for the release process.
+See [docs/RELEASING.md](docs/RELEASING.md) for the release process and
+[docs/TESTING.md](docs/TESTING.md) for the test setup.
 
 ## How it works
 

@@ -4,6 +4,15 @@ Releases are cut from git tags. Pushing a `v*` tag runs the release CI
 job, which publishes to crates.io and attaches release binaries to a
 GitHub Release. There is no manual upload step.
 
+## Commit messages
+
+This repo follows [Conventional Commits](https://www.conventionalcommits.org/):
+`feat:`, `fix:`, `docs:`, `ci:`, `test:`, `refactor:`, `chore:`.
+Write the subject in imperative mood, keep it under 72 characters, and
+put the why in the body when it isn't obvious from the subject. The
+history was converted to this format in October 2026; keep it that way —
+a future changelog generator will read these prefixes.
+
 ## One-time setup
 
 1. Create a crates.io API token: crates.io → your profile → Account
