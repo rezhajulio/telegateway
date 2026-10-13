@@ -126,6 +126,11 @@ Telegram ──POST /webhooks/:bot_id──▶ telegateway ──POST──▶ y
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design: component breakdown, design patterns, security model, and failure handling.
 
+## Examples
+
+`example/` has three echo bots (Python, Go, Rust) and one gateway config
+routing to all three. See [example/README.md](example/README.md).
+
 ## Roadmap
 
 - Durable outbox: persist accepted updates and deliver asynchronously with retries and a dead-letter trail.

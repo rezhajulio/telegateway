@@ -2,3 +2,6 @@
 config.toml
 *.log
 .env
+example/echo-rust/target/
+example/echo-go/echo-go
+example/echo-python/__pycache__/
