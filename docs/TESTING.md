@@ -28,6 +28,7 @@ test launches the binary). Keep all of it green before pushing.
     `tower::ServiceExt::oneshot`), with a stub downstream bot.
   - `outbox.rs`: dispatcher delivery, retries, backoff, dead letters,
     and breaker behavior against stub downstream servers.
+  - `concurrency.rs`: bounded concurrent delivery across chats, in-order same-chat delivery, error isolation, and breaker handling.
   - `register.rs`: `setWebhook` against a stub Telegram API.
   - `otel.rs`: OTEL config parsing/validation, no-op init, init
     against a dead endpoint, `pending_counts`.

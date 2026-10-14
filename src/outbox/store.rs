@@ -22,12 +22,13 @@ pub struct OutboxRow {
     pub bot_id: String,
     /// Telegram's update id; dedupe key together with `bot_id`.
     pub update_id: i64,
+    /// Optional chat key for per-chat in-order delivery.
+    pub chat_key: Option<i64>,
     /// The raw JSON body Telegram sent.
     pub payload: String,
     /// Delivery attempts so far.
     pub attempts: i64,
 }
-
 /// One row in the outbox listing.
 #[derive(Debug, serde::Serialize)]
 pub struct OutboxEntry {
@@ -118,21 +119,22 @@ impl Store {
         }
         Ok(())
     }
-
-    /// Insert an accepted update. Returns `false` when the
-    /// `(bot_id, update_id)` pair is already queued: a Telegram redelivery.
+    /// Insert an accepted update with an optional chat key. Returns `false` when
+    /// the `(bot_id, update_id)` pair is already queued: a Telegram redelivery.
     pub async fn insert(
         &self,
         bot_id: &str,
         update_id: i64,
+        chat_key: Option<i64>,
         payload: &str,
     ) -> Result<bool, sqlx::Error> {
         let res = sqlx::query(
-            "INSERT OR IGNORE INTO outbox(bot_id, update_id, payload, created_at)
-             VALUES(?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO outbox(bot_id, update_id, chat_key, payload, created_at)
+             VALUES(?, ?, ?, ?, ?)",
         )
         .bind(bot_id)
         .bind(update_id)
+        .bind(chat_key)
         .bind(payload)
         .bind(now_millis())
         .execute(&self.pool)
@@ -143,18 +145,26 @@ impl Store {
     /// Atomically claim due rows for one bot and bump their attempt counter.
     /// Returns rows ordered by database id.
     pub async fn claim_due(&self, bot_id: &str, limit: i64) -> Result<Vec<OutboxRow>, sqlx::Error> {
+        let now = now_millis();
         let rows = sqlx::query(
             "UPDATE outbox SET status = 'in_flight', attempts = attempts + 1
              WHERE id IN (
-               SELECT id FROM outbox
-               WHERE bot_id = ? AND status = 'pending'
-                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-               ORDER BY id LIMIT ?
+               SELECT o.id FROM outbox o
+               WHERE o.bot_id = ? AND o.status = 'pending'
+                 AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= ?)
+                 AND (o.chat_key IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM outbox p
+                   WHERE p.bot_id = o.bot_id AND p.chat_key = o.chat_key AND p.id < o.id
+                     AND (p.status = 'in_flight'
+                          OR (p.status = 'pending' AND p.next_attempt_at > ?))
+                 ))
+               ORDER BY o.id LIMIT ?
              )
-             RETURNING id, bot_id, update_id, payload, attempts",
+             RETURNING id, bot_id, update_id, chat_key, payload, attempts",
         )
         .bind(bot_id)
-        .bind(now_millis())
+        .bind(now)
+        .bind(now)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -164,6 +174,7 @@ impl Store {
                 id: r.get("id"),
                 bot_id: r.get("bot_id"),
                 update_id: r.get("update_id"),
+                chat_key: r.get("chat_key"),
                 payload: r.get("payload"),
                 attempts: r.get("attempts"),
             })

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `outbox.delivery_concurrency` setting to configure bounded concurrent delivery across different chats (default 1, 1..=64).
+
+### Changed
+
+- Migration 002: added `chat_key` column to `outbox` table to preserve per-chat sequential delivery ordering while allowing cross-chat parallelism.
+
 ## [0.1.0] - 2026-10-13
 
 First release.

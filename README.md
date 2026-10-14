@@ -118,6 +118,7 @@ rate_limit_per_minute = 30
 | `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30; 1–36500). |
 | `outbox.max_pending`         | Max pending+in-flight rows per bot before 503 shedding (default `10000`, min `1`). |
 | `outbox.max_dead_letters`    | Dead letters kept per bot; oldest beyond this are pruned hourly (default `10000`, min `1`). |
+| `outbox.delivery_concurrency` | Max concurrent deliveries per bot across different chats (default `1`, 1–64; downstream will see up to N concurrent requests). |
 | `circuit_breaker.failure_threshold` | Consecutive failures that trip the breaker (default `5`, min `1`). |
 | `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`, min `1`). |
 | `circuit_breaker.max_cooldown_secs` | Cap for doubling cooldown (default `600`, must be `>= cooldown_secs`). |

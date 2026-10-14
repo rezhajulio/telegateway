@@ -96,18 +96,18 @@ async fn stub_downstream(
 async fn insert_dedupes_on_bot_and_update_id() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    assert!(store.insert("demo", 1, "{}").await.unwrap());
-    assert!(!store.insert("demo", 1, "{}").await.unwrap());
+    assert!(store.insert("demo", 1, None, "{}").await.unwrap());
+    assert!(!store.insert("demo", 1, None, "{}").await.unwrap());
     // Same update_id for a different bot is a different row.
-    assert!(store.insert("other", 1, "{}").await.unwrap());
+    assert!(store.insert("other", 1, None, "{}").await.unwrap());
 }
 
 #[tokio::test]
 async fn claim_bumps_attempts_and_hides_claimed_rows() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
-    store.insert("demo", 2, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
+    store.insert("demo", 2, None, "{}").await.unwrap();
 
     let rows = store.claim_due("demo", 32).await.unwrap();
     assert_eq!(rows.len(), 2);
@@ -115,7 +115,7 @@ async fn claim_bumps_attempts_and_hides_claimed_rows() {
 
     assert!(store.claim_due("demo", 32).await.unwrap().is_empty());
     // Other bots' rows are untouched.
-    store.insert("other", 1, "{}").await.unwrap();
+    store.insert("other", 1, None, "{}").await.unwrap();
     assert_eq!(store.claim_due("other", 32).await.unwrap().len(), 1);
 }
 
@@ -123,7 +123,7 @@ async fn claim_bumps_attempts_and_hides_claimed_rows() {
 async fn failed_attempts_back_off_then_dead_letter() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
 
     // Attempt 1 fails: requeued with a future next_attempt_at.
     let rows = store.claim_due("demo", 32).await.unwrap();
@@ -161,7 +161,7 @@ async fn failed_attempts_back_off_then_dead_letter() {
 async fn delivered_rows_are_not_reclaimed() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 32).await.unwrap();
     store.mark_delivered(rows[0].id).await.unwrap();
     assert!(store.claim_due("demo", 32).await.unwrap().is_empty());
@@ -172,7 +172,7 @@ async fn delivered_rows_are_not_reclaimed() {
 async fn in_flight_rows_are_requeued_on_open() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     assert_eq!(store.claim_due("demo", 32).await.unwrap().len(), 1);
     drop(store);
 
@@ -187,7 +187,7 @@ async fn in_flight_rows_are_requeued_on_open() {
 async fn in_flight_rows_keep_backoff_on_restart() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 32).await.unwrap();
     // Simulate failure with backoff in future
     store.mark_failed(rows[0].id, "err", 5).await.unwrap();
@@ -209,9 +209,9 @@ async fn in_flight_rows_keep_backoff_on_restart() {
 async fn list_filters_by_status_bot_and_limit() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
-    store.insert("demo", 2, "{}").await.unwrap();
-    store.insert("other", 3, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
+    store.insert("demo", 2, None, "{}").await.unwrap();
+    store.insert("other", 3, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 32).await.unwrap();
     store.mark_delivered(rows[0].id).await.unwrap();
     store.mark_failed(rows[1].id, "x", 1).await.unwrap();
@@ -243,7 +243,7 @@ async fn find_payload_returns_newest_stored_body() {
     let store = Store::open(db.path()).await.unwrap();
     assert_eq!(store.find_payload("demo", 9).await.unwrap(), None);
     store
-        .insert("demo", 9, r#"{"update_id":9,"n":1}"#)
+        .insert("demo", 9, None, r#"{"update_id":9,"n":1}"#)
         .await
         .unwrap();
     assert_eq!(
@@ -256,7 +256,7 @@ async fn find_payload_returns_newest_stored_body() {
 async fn prune_drops_old_rows() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 32).await.unwrap();
     store.mark_delivered(rows[0].id).await.unwrap();
 
@@ -275,10 +275,10 @@ async fn prune_caps_dead_letters_per_bot_keeping_newest() {
     let store = Store::open(db.path()).await.unwrap();
     for bot in ["a", "b"] {
         for u in 1..=5 {
-            store.insert(bot, u, "{}").await.unwrap();
+            store.insert(bot, u, None, "{}").await.unwrap();
         }
     }
-    store.insert("a", 99, "{}").await.unwrap(); // stays pending
+    store.insert("a", 99, None, "{}").await.unwrap(); // stays pending
     for bot in ["a", "b"] {
         for row in store.claim_due(bot, 5).await.unwrap() {
             store.mark_dead(row.id, "boom").await.unwrap();
@@ -300,7 +300,7 @@ async fn prune_caps_dead_letters_per_bot_keeping_newest() {
 async fn wake_pending_clears_backoff() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 32).await.unwrap();
     store.mark_failed(rows[0].id, "x", 10).await.unwrap();
     assert!(store.claim_due("demo", 32).await.unwrap().is_empty());
@@ -352,7 +352,7 @@ async fn breaker_opens_and_fast_fails_without_burning_attempts() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
     for id in 1..=3 {
-        store.insert("demo", id, "{}").await.unwrap();
+        store.insert("demo", id, None, "{}").await.unwrap();
     }
 
     // Threshold 2, cooldown far in the future: no probe during this test.
@@ -382,8 +382,8 @@ async fn breaker_probe_recovers_and_wakes_queue() {
     let (downstream, _rx, hits) = stub_counting_downstream(1).await;
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
-    store.insert("demo", 2, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
+    store.insert("demo", 2, None, "{}").await.unwrap();
 
     let d = dispatcher_with_breaker(
         store.clone(),
@@ -419,7 +419,10 @@ async fn dispatcher_delivers_pending_rows() {
     let (downstream, mut rx) = stub_downstream(0).await;
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 7, r#"{"update_id":7}"#).await.unwrap();
+    store
+        .insert("demo", 7, None, r#"{"update_id":7}"#)
+        .await
+        .unwrap();
 
     let d = dispatcher(store.clone(), test_bot(downstream), 3);
     assert_eq!(d.drain_once().await, 1);
@@ -436,7 +439,7 @@ async fn dispatcher_retries_then_succeeds() {
     let (downstream, mut rx) = stub_downstream(1).await;
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 7, "{}").await.unwrap();
+    store.insert("demo", 7, None, "{}").await.unwrap();
 
     let d = dispatcher(store.clone(), test_bot(downstream), 3);
     assert_eq!(d.drain_once().await, 1);
@@ -457,7 +460,7 @@ async fn dispatcher_dead_letters_after_max_attempts() {
     let (downstream, _rx) = stub_downstream(usize::MAX).await;
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 7, "{}").await.unwrap();
+    store.insert("demo", 7, None, "{}").await.unwrap();
 
     let d = dispatcher(store.clone(), test_bot(downstream), 2);
     d.drain_once().await;
@@ -506,7 +509,7 @@ async fn dispatcher_run_parks_when_breaker_open_and_queue_empty() {
 async fn requeue_keeps_attempts() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
     let rows = store.claim_due("demo", 1).await.unwrap();
     assert_eq!(rows[0].attempts, 1);
     store.requeue(&[rows[0].id]).await.unwrap();
@@ -544,7 +547,10 @@ async fn permanent_400_dead_letters_immediately_and_leaves_breaker_closed() {
 
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 101, r#"{"bad":true}"#).await.unwrap();
+    store
+        .insert("demo", 101, None, r#"{"bad":true}"#)
+        .await
+        .unwrap();
 
     let bot = test_bot(format!("http://{addr}/webhook"));
     let d = dispatcher_with_breaker(store.clone(), bot, 5, 2, Duration::from_secs(60));
@@ -583,7 +589,7 @@ async fn retry_after_honored_on_429_or_503() {
 
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 201, "{}").await.unwrap();
+    store.insert("demo", 201, None, "{}").await.unwrap();
 
     let bot = test_bot(format!("http://{addr}/webhook"));
     let d = dispatcher_with_breaker(store.clone(), bot, 5, 10, Duration::from_secs(60));
@@ -611,7 +617,7 @@ async fn transient_500_retries_and_trips_breaker() {
     let (downstream, _rx, counter) = stub_counting_downstream(10).await;
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 301, "{}").await.unwrap();
+    store.insert("demo", 301, None, "{}").await.unwrap();
 
     let bot = test_bot(downstream);
     // Breaker trips after 1 failure
@@ -645,7 +651,7 @@ async fn shutdown_signal_stops_run_without_losing_rows() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
     for id in 1..=5 {
-        store.insert("demo", id, "{}").await.unwrap();
+        store.insert("demo", id, None, "{}").await.unwrap();
     }
 
     let (tx, rx) = tokio::sync::watch::channel(false);
@@ -694,7 +700,7 @@ async fn shutdown_signal_stops_run_without_losing_rows() {
 async fn mark_failed_on_non_in_flight_row_is_noop() {
     let db = TestDb::new();
     let store = Store::open(db.path()).await.unwrap();
-    store.insert("demo", 1, "{}").await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
 
     // Row is pending, not in_flight
     let res = store.mark_failed(1, "err", 5).await.unwrap();
@@ -709,4 +715,61 @@ async fn mark_failed_on_non_in_flight_row_is_noop() {
     let res2 = store.mark_failed(rows[0].id, "err", 5).await.unwrap();
     assert_eq!(res2, None);
     assert_eq!(store.status_of("demo", 1).await.unwrap(), "delivered");
+}
+
+#[tokio::test]
+async fn chat_key_round_trips() {
+    let db = TestDb::new();
+    let store = Store::open(db.path()).await.unwrap();
+
+    assert!(store.insert("demo", 1, Some(42), "{}").await.unwrap());
+    assert!(store.insert("demo", 2, None, "{}").await.unwrap());
+
+    let rows = store.claim_due("demo", 10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].update_id, 1);
+    assert_eq!(rows[0].chat_key, Some(42));
+    assert_eq!(rows[1].update_id, 2);
+    assert_eq!(rows[1].chat_key, None);
+}
+
+#[tokio::test]
+async fn migration_002_applies_on_v010_db() {
+    use sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+    };
+
+    let db = TestDb::new();
+    let options = SqliteConnectOptions::new()
+        .filename(db.path())
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    // Run migration 001 manually via raw_sql
+    sqlx::raw_sql(include_str!("../migrations/001_outbox.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert a row in v001 schema (no chat_key column)
+    sqlx::query(
+        "INSERT INTO outbox(bot_id, update_id, payload, created_at) VALUES('demo', 1, '{}', 1000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    pool.close().await;
+
+    // Store::open runs all migrations (001 will be recorded by sqlx or skipped, 002 applied)
+    let store = Store::open(db.path()).await.unwrap();
+    let rows = store.claim_due("demo", 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].update_id, 1);
+    assert_eq!(rows[0].chat_key, None);
 }

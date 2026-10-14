@@ -95,15 +95,18 @@ pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
             Duration::from_secs(config.circuit_breaker.cooldown_secs),
             Duration::from_secs(config.circuit_breaker.max_cooldown_secs),
         );
-        dispatchers.push(Arc::new(Dispatcher::new(
-            store.clone(),
-            http.clone(),
-            bot.clone(),
-            config.outbox.max_attempts,
-            Duration::from_millis(config.outbox.poll_interval_ms),
-            notify,
-            breaker,
-        )));
+        dispatchers.push(Arc::new(
+            Dispatcher::new(
+                store.clone(),
+                http.clone(),
+                bot.clone(),
+                config.outbox.max_attempts,
+                Duration::from_millis(config.outbox.poll_interval_ms),
+                notify,
+                breaker,
+            )
+            .with_concurrency(config.outbox.delivery_concurrency),
+        ));
     }
 
     let policy = AdmissionPolicy::new(&config.bots);

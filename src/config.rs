@@ -119,6 +119,9 @@ pub struct OutboxConfig {
     /// hourly, in addition to the 30-day age limit.
     #[serde(default = "default_max_dead_letters")]
     pub max_dead_letters: u64,
+    /// Maximum concurrent row deliveries in flight per bot across different chats.
+    #[serde(default = "default_delivery_concurrency")]
+    pub delivery_concurrency: usize,
 }
 
 impl Default for OutboxConfig {
@@ -130,6 +133,7 @@ impl Default for OutboxConfig {
             delivered_retention_days: default_delivered_retention_days(),
             max_pending: default_max_pending(),
             max_dead_letters: default_max_dead_letters(),
+            delivery_concurrency: default_delivery_concurrency(),
         }
     }
 }
@@ -140,6 +144,10 @@ fn default_max_pending() -> u64 {
 
 fn default_max_dead_letters() -> u64 {
     10_000
+}
+
+fn default_delivery_concurrency() -> usize {
+    1
 }
 
 fn default_outbox_path() -> String {
@@ -372,6 +380,11 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         ));
     }
 
+    if !(1..=64).contains(&config.outbox.delivery_concurrency) {
+        return Err(ConfigError::Validation(
+            "`outbox.delivery_concurrency` must be between 1 and 64".to_owned(),
+        ));
+    }
     if config.circuit_breaker.failure_threshold == 0 {
         return Err(ConfigError::Validation(
             "`circuit_breaker.failure_threshold` must be at least 1".to_owned(),
@@ -482,6 +495,7 @@ rate_limit_per_minute = 30
         assert_eq!(config.outbox.max_pending, 10_000);
         assert_eq!(config.outbox.poll_interval_ms, 1000);
         assert_eq!(config.outbox.delivered_retention_days, 7);
+        assert_eq!(config.outbox.delivery_concurrency, 1);
     }
 
     #[test]
@@ -703,6 +717,22 @@ webhook_secret = "other"
         assert_eq!(config.outbox.max_dead_letters, 50);
 
         let text = format!("{}\n[outbox]\nmax_dead_letters = 0\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_outbox_delivery_concurrency() {
+        let text = format!("{}\n[outbox]\ndelivery_concurrency = 8\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.outbox.delivery_concurrency, 8);
+
+        let text = format!("{}\n[outbox]\ndelivery_concurrency = 0\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+
+        let text = format!("{}\n[outbox]\ndelivery_concurrency = 65\n", valid_toml());
         let config: Config = toml::from_str(&text).unwrap();
         assert!(validate(&config).is_err());
     }

@@ -89,10 +89,10 @@ async fn pending_counts_groups_by_bot() {
     let file = temp_db();
     let path = file.path().to_str().unwrap();
     let store = Store::open(path).await.unwrap();
-    store.insert("bot-a", 1, "{}").await.unwrap();
-    store.insert("bot-a", 2, "{}").await.unwrap();
-    store.insert("bot-b", 3, "{}").await.unwrap();
-    store.insert("bot-b", 3, "{}").await.unwrap(); // duplicate, ignored
+    store.insert("bot-a", 1, None, "{}").await.unwrap();
+    store.insert("bot-a", 2, None, "{}").await.unwrap();
+    store.insert("bot-b", 3, None, "{}").await.unwrap();
+    store.insert("bot-b", 3, None, "{}").await.unwrap(); // duplicate, ignored
 
     let mut counts = store.pending_counts().await.unwrap();
     counts.sort();

@@ -138,7 +138,7 @@ pub async fn webhook_handler(
     // (d) Persist original payload bytes. INSERT OR IGNORE guards concurrent races.
     match state
         .store
-        .insert(&bot_id, envelope.update_id, body_str)
+        .insert(&bot_id, envelope.update_id, envelope.chat_key, body_str)
         .await
     {
         Ok(true) => {

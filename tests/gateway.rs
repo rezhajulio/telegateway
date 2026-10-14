@@ -212,6 +212,26 @@ async fn duplicate_update_is_accepted_once() {
 }
 
 #[tokio::test]
+async fn webhook_stores_chat_key_for_message_update() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config(downstream, 30);
+    let built = app::build_router(config).await.unwrap();
+
+    let resp = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(1001, 77)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let rows = built.store.claim_due("demo", 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].update_id, 1001);
+    assert_eq!(rows[0].chat_key, Some(77));
+}
+
+#[tokio::test]
 async fn rate_limited_updates_answer_200_without_forwarding() {
     let (downstream, mut rx) = stub_downstream().await;
     // Quota of 1 per minute: the second update from the same chat is rejected.

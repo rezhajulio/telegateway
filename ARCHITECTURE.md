@@ -134,9 +134,7 @@ before answering Telegram, so a crashed or downed bot loses nothing.
   `outbox.delivered_retention_days` (default 7) and dead letters after
   30 days or beyond `outbox.max_dead_letters` per bot (oldest first). The schema enforces a status CHECK constraint and has an
   index tuned for atomic claims.
-- **Ordering**: each bot's dispatcher works sequentially; delivery ordering
-  is at-least-once, per-bot sequential, best-effort order (retries reorder
-  around failed updates). Downstream must deduplicate on `update_id`.
+- **Ordering**: per-chat order is preserved (a failed row stops its chat's later rows until retried), with no ordering across chats. Delivery concurrency defaults to 1 (pure sequential delivery); when configured higher, updates for different chats are delivered concurrently up to `outbox.delivery_concurrency`, while updates for the same chat remain strictly sequential in update_id order. Downstream must deduplicate on `update_id`.
 One crate, one binary.
 
 ## 6. Design patterns
