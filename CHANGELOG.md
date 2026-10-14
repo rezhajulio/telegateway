@@ -66,7 +66,7 @@ First release.
 - Delivery is at-least-once, per-bot sequential, best-effort ordered;
   downstream bots must dedupe on `update_id`.
 - Release automation: `cargo publish` to crates.io and release binaries
-  (Linux x86_64, macOS ARM64) on `v*` tags. See `docs/RELEASING.md`.
+  (Linux x86_64 and aarch64, macOS x86_64 and ARM64) on `v*` tags. See `docs/RELEASING.md`.
 
 ### Fixed
 

@@ -39,8 +39,9 @@ stops before the GitHub Release is created.
    ```
 5. Watch the release workflow. On success you get:
    - `telegateway` `0.2.0` on crates.io (`cargo install telegateway`),
-   - a GitHub Release `v0.2.0` with `telegateway-x86_64-unknown-linux-gnu.tar.gz`
-     and `telegateway-aarch64-apple-darwin.tar.gz`.
+   - a GitHub Release `v0.2.0` with `telegateway-<target>.tar.gz` for
+     `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+     `aarch64-apple-darwin` and `x86_64-apple-darwin`.
 
 The tag version and the `Cargo.toml` version should match; CI does not
 enforce this, it publishes whatever `Cargo.toml` says.
