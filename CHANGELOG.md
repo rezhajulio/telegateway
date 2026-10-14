@@ -7,20 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `outbox.delivery_concurrency` setting to configure bounded concurrent delivery across different chats (default 1, 1..=64).
-
-### Changed
-
-- Migration 002: added `chat_key` column to `outbox` table to preserve per-chat sequential delivery ordering while allowing cross-chat parallelism.
-
-## [0.1.0] - 2026-10-13
+## [0.1.0] - 2026-10-14
 
 First release.
 
 ### Added
 
+- Bounded per-chat concurrent delivery: `outbox.delivery_concurrency`
+  (default 1, 1..=64). Different chats are delivered in parallel; one chat
+  is always delivered in order, and a failed row blocks that chat's later
+  rows until it is retried. Rows carry a `chat_key` column.
 - Webhook ingress per bot (`POST /webhooks/{bot_id}`) with constant-time
   webhook-secret validation.
 - Per-chat token-bucket rate limiting; rejections answer `200` so abusive
