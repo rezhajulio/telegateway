@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Dependency updates resolving 7 of 8 flagged CVEs: rustls 0.23.45 ->
+  0.23.46, rustls-webpki 0.103.15 -> 0.103.16, webpki-roots 1.0.9 ->
+  1.0.11, OpenTelemetry family 0.28 -> 0.32 (sdk 0.32.1). Same rustls
+  updates in `example/echo-rust`.
+
 ## [0.1.0] - 2026-10-14
 
 First release.
