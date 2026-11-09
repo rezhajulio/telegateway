@@ -3,4 +3,8 @@
 # drivers; it is not compiled into any telegateway target
 # (`cargo tree -i rsa --target all` is empty), and no fixed release exists.
 # Revisit when sqlx stops locking it.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0459 (CVE-2026-119375): libsqlite3-sys via SQLite WAL page size mismatch.
+# SQLite DB files are local to telegateway container (trusted host volume), not untrusted inputs.
+# Patched libsqlite3-sys >= 0.39 requires sqlx 0.9.0 which is not yet locked by sqlx 0.8 branch.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
