@@ -221,14 +221,14 @@ impl Dispatcher {
                         .map(|r| r.id)
                         .chain(groups_iter.flat_map(|g| g.into_iter().map(|r| r.id)))
                         .collect();
-                    if !ids.is_empty() {
-                        if let Err(e) = self.inner.store.requeue(&ids).await {
-                            tracing::error!(
-                                bot_id = %self.inner.bot.id,
-                                error = %e,
-                                "failed to requeue rows after breaker opened or shutdown"
-                            );
-                        }
+                    if !ids.is_empty()
+                        && let Err(e) = self.inner.store.requeue(&ids).await
+                    {
+                        tracing::error!(
+                            bot_id = %self.inner.bot.id,
+                            error = %e,
+                            "failed to requeue rows after breaker opened or shutdown"
+                        );
                     }
                     break;
                 }
@@ -262,14 +262,14 @@ impl Dispatcher {
                         attempted += 1;
                         if !outcome {
                             let ids: Vec<i64> = rows_iter.map(|r| r.id).collect();
-                            if !ids.is_empty() {
-                                if let Err(e) = inner.store.requeue(&ids).await {
-                                    tracing::error!(
-                                        bot_id = %inner.bot.id,
-                                        error = %e,
-                                        "failed to requeue remaining rows after failure"
-                                    );
-                                }
+                            if !ids.is_empty()
+                                && let Err(e) = inner.store.requeue(&ids).await
+                            {
+                                tracing::error!(
+                                    bot_id = %inner.bot.id,
+                                    error = %e,
+                                    "failed to requeue remaining rows after failure"
+                                );
                             }
                             break;
                         }
