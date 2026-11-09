@@ -170,7 +170,7 @@ Certificate issuance and renewal stay your job (certbot, Caddy, your CA);
 send `SIGHUP` to reload certificates without dropping connections.
 ## Install from source
 
-You need the [Rust toolchain](https://rustup.rs) (1.85+):
+You need the [Rust toolchain](https://rustup.rs) (1.94+):
 
 ```sh
 git clone https://github.com/rezhajulio/telegateway.git

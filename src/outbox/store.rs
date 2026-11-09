@@ -280,26 +280,18 @@ impl Store {
         bot_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<OutboxEntry>, sqlx::Error> {
-        let mut sql = String::from(
-            "SELECT id, bot_id, update_id, status, attempts, next_attempt_at, last_error, created_at
-             FROM outbox WHERE 1 = 1",
+        let mut builder = sqlx::QueryBuilder::new(
+            "SELECT id, bot_id, update_id, status, attempts, next_attempt_at, last_error, created_at FROM outbox WHERE 1 = 1",
         );
         if status != "all" {
-            sql.push_str(" AND status = ?");
-        }
-        if bot_id.is_some() {
-            sql.push_str(" AND bot_id = ?");
-        }
-        sql.push_str(" ORDER BY id DESC LIMIT ?");
-
-        let mut query = sqlx::query(&sql);
-        if status != "all" {
-            query = query.bind(status);
+            builder.push(" AND status = ").push_bind(status);
         }
         if let Some(bot) = bot_id {
-            query = query.bind(bot);
+            builder.push(" AND bot_id = ").push_bind(bot);
         }
-        let rows = query.bind(limit).fetch_all(&self.pool).await?;
+        builder.push(" ORDER BY id DESC LIMIT ").push_bind(limit);
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|r| OutboxEntry {

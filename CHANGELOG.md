@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-09
+
+### Changed
+
+- Upgrade `sqlx` and `sqlx-sqlite` dependencies from 0.8 to 0.9.0.
+- Bump MSRV (`rust-version`) to 1.94.
+- Adapt `Store::list` dynamic SQL query construction to `sqlx::QueryBuilder` for `SqlSafeStr` compatibility.
+- Remove obsolete `RUSTSEC-2023-0071` ignore from `.cargo/audit.toml` as `rsa` dependency was dropped.
+
 ### Fixed
 
-- Dependency updates resolving 7 of 8 flagged CVEs: rustls 0.23.45 ->
-  0.23.46, rustls-webpki 0.103.15 -> 0.103.16, webpki-roots 1.0.9 ->
-  1.0.11, OpenTelemetry family 0.28 -> 0.32 (sdk 0.32.1). Same rustls
-  updates in `example/echo-rust`.
+- Collapse nested `if` statements in outbox dispatcher requeue logic.
 
 ## [0.1.0] - 2026-10-14
 
