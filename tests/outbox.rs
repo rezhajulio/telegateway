@@ -36,6 +36,7 @@ fn test_bot(downstream_url: String) -> BotConfig {
         downstream_url,
         webhook_secret: "s3cret".to_owned(),
         rate_limit_per_minute: 30,
+        allowed_updates: None,
     }
 }
 

@@ -73,6 +73,7 @@ mod tests {
             downstream_url: "http://127.0.0.1:8081/webhook".to_owned(),
             webhook_secret: "s3cret".to_owned(),
             rate_limit_per_minute: 2,
+            allowed_updates: None,
         }]
     }
 

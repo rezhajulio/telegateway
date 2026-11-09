@@ -127,9 +127,11 @@ rate_limit_per_minute = 30
 | `otel.endpoint`              | OTLP/HTTP collector base URL for traces and metrics. Export off when unset. |
 | `otel.service_name`          | `service.name` resource attribute (default `telegateway`).  |
 | `bots[].id`                  | Public id used in the webhook route. Must be unique.         |
+| `bots[].bot_token`            | Optional Telegram bot token used for `auto_register`.       |
 | `bots[].downstream_url`      | Internal bot endpoint receiving the forwarded update.       |
 | `bots[].webhook_secret`      | Compared in constant time against Telegram's secret header. |
 | `bots[].rate_limit_per_minute` | Per-chat token-bucket quota (default `30`).                |
+| `bots[].allowed_updates`     | List of update types forwarded to Telegram `setWebhook`. When unset, Telegram keeps previous setting; pass `[]` for Telegram defaults. |
 
 Set `RUST_LOG` to control log verbosity, e.g. `RUST_LOG=telegateway=debug`.
 
