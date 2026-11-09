@@ -1,6 +1,6 @@
 [package]
 name = "telegateway"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A reverse-proxy gateway for Telegram bots: webhook ingress, per-chat rate limiting, and structured observability."
 rust-version = "1.94"
