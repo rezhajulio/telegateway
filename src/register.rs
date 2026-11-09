@@ -70,12 +70,16 @@ pub async fn register_bot(
 ) -> Result<(), RegisterError> {
     let token = bot.bot_token.as_deref().unwrap_or("");
     let url = format!("{}/bot{token}/setWebhook", api_base.trim_end_matches('/'));
+    let mut payload = serde_json::json!({
+        "url": webhook_url(public_url, &bot.id),
+        "secret_token": bot.webhook_secret,
+    });
+    if let Some(allowed) = &bot.allowed_updates {
+        payload["allowed_updates"] = serde_json::json!(allowed);
+    }
     let resp = client
         .post(&url)
-        .json(&serde_json::json!({
-            "url": webhook_url(public_url, &bot.id),
-            "secret_token": bot.webhook_secret,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(reqwest::Error::without_url)
@@ -187,5 +191,134 @@ mod tests {
             webhook_url("https://gw.example.com/", "echo-go"),
             "https://gw.example.com/webhooks/echo-go"
         );
+    }
+
+    #[tokio::test]
+    async fn register_bot_includes_allowed_updates_when_configured() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf)
+                .await
+                .unwrap();
+            let req_str = String::from_utf8_lossy(&buf[..n]);
+            let json_start = req_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+            let body: serde_json::Value = serde_json::from_str(&req_str[json_start..]).unwrap();
+            assert_eq!(
+                body["allowed_updates"],
+                serde_json::json!(["message", "chat_member"])
+            );
+
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+            tokio::io::AsyncWriteExt::write_all(&mut socket, resp.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let bot = BotConfig {
+            id: "test-bot".to_owned(),
+            bot_token: Some("dummy-token".to_owned()),
+            downstream_url: "http://127.0.0.1:8081/webhook".to_owned(),
+            webhook_secret: "secret123".to_owned(),
+            rate_limit_per_minute: 30,
+            allowed_updates: Some(vec!["message".to_owned(), "chat_member".to_owned()]),
+        };
+
+        let client = default_client();
+        let res = register_bot(
+            &client,
+            &format!("http://{addr}"),
+            &bot,
+            "https://gw.example.com",
+        )
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn register_bot_omits_allowed_updates_when_none() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf)
+                .await
+                .unwrap();
+            let req_str = String::from_utf8_lossy(&buf[..n]);
+            let json_start = req_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+            let body: serde_json::Value = serde_json::from_str(&req_str[json_start..]).unwrap();
+            assert!(body.get("allowed_updates").is_none());
+
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+            tokio::io::AsyncWriteExt::write_all(&mut socket, resp.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let bot = BotConfig {
+            id: "test-bot-none".to_owned(),
+            bot_token: Some("dummy-token".to_owned()),
+            downstream_url: "http://127.0.0.1:8081/webhook".to_owned(),
+            webhook_secret: "secret123".to_owned(),
+            rate_limit_per_minute: 30,
+            allowed_updates: None,
+        };
+
+        let client = default_client();
+        let res = register_bot(
+            &client,
+            &format!("http://{addr}"),
+            &bot,
+            "https://gw.example.com",
+        )
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn register_bot_sends_empty_array_when_empty_vec() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf)
+                .await
+                .unwrap();
+            let req_str = String::from_utf8_lossy(&buf[..n]);
+            let json_start = req_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+            let body: serde_json::Value = serde_json::from_str(&req_str[json_start..]).unwrap();
+            assert_eq!(body["allowed_updates"], serde_json::json!([]));
+
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+            tokio::io::AsyncWriteExt::write_all(&mut socket, resp.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let bot = BotConfig {
+            id: "test-bot-empty".to_owned(),
+            bot_token: Some("dummy-token".to_owned()),
+            downstream_url: "http://127.0.0.1:8081/webhook".to_owned(),
+            webhook_secret: "secret123".to_owned(),
+            rate_limit_per_minute: 30,
+            allowed_updates: Some(vec![]),
+        };
+
+        let client = default_client();
+        let res = register_bot(
+            &client,
+            &format!("http://{addr}"),
+            &bot,
+            "https://gw.example.com",
+        )
+        .await;
+        assert!(res.is_ok());
     }
 }

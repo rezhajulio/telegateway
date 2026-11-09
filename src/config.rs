@@ -61,6 +61,11 @@ pub struct BotConfig {
     /// Token-bucket quota, per chat, refilled every minute.
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_minute: u32,
+    /// List of update types the bot should receive (forwarded to Telegram `setWebhook`).
+    /// When None, Telegram retains the previous setting. To reset to Telegram defaults
+    /// (all except chat_member, message_reaction, message_reaction_count), pass `[]`.
+    #[serde(default)]
+    pub allowed_updates: Option<Vec<String>>,
 }
 
 impl fmt::Debug for BotConfig {
@@ -71,6 +76,7 @@ impl fmt::Debug for BotConfig {
             .field("downstream_url", &self.downstream_url)
             .field("webhook_secret", &"[REDACTED]")
             .field("rate_limit_per_minute", &self.rate_limit_per_minute)
+            .field("allowed_updates", &self.allowed_updates)
             .finish()
     }
 }
@@ -325,6 +331,16 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
                 bot.id
             )));
         }
+        if let Some(updates) = &bot.allowed_updates {
+            for update_type in updates {
+                if !is_valid_update_type(update_type) {
+                    return Err(ConfigError::Validation(format!(
+                        "bot `{}`: invalid update type in `allowed_updates`: `{update_type}`",
+                        bot.id
+                    )));
+                }
+            }
+        }
     }
 
     if config.auto_register
@@ -470,6 +486,37 @@ fn is_valid_webhook_secret(secret: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Known Telegram Update types per Bot API 10.3 specification.
+const KNOWN_UPDATE_TYPES: &[&str] = &[
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "business_connection",
+    "business_message",
+    "edited_business_message",
+    "deleted_business_messages",
+    "message_reaction",
+    "message_reaction_count",
+    "inline_query",
+    "chosen_inline_result",
+    "callback_query",
+    "shipping_query",
+    "pre_checkout_query",
+    "purchased_paid_media",
+    "poll",
+    "poll_answer",
+    "my_chat_member",
+    "chat_member",
+    "chat_join_request",
+    "chat_boost",
+    "removed_chat_boost",
+];
+
+fn is_valid_update_type(update_type: &str) -> bool {
+    KNOWN_UPDATE_TYPES.contains(&update_type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,10 +539,53 @@ rate_limit_per_minute = 30
         validate(&config).unwrap();
         assert_eq!(config.bots.len(), 1);
         assert_eq!(config.bots[0].id, "demo");
+        assert_eq!(config.bots[0].allowed_updates, None);
         assert_eq!(config.outbox.max_pending, 10_000);
         assert_eq!(config.outbox.poll_interval_ms, 1000);
         assert_eq!(config.outbox.delivered_retention_days, 7);
         assert_eq!(config.outbox.delivery_concurrency, 1);
+    }
+
+    #[test]
+    fn parses_allowed_updates_config() {
+        let toml_str = r#"
+listen = "127.0.0.1:8080"
+
+[[bots]]
+id = "demo"
+downstream_url = "http://127.0.0.1:8081/webhook"
+webhook_secret = "s3cret"
+allowed_updates = ["message", "chat_member"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(
+            config.bots[0].allowed_updates,
+            Some(vec!["message".to_owned(), "chat_member".to_owned()])
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_allowed_updates() {
+        let toml_str = r#"
+listen = "127.0.0.1:8080"
+
+[[bots]]
+id = "demo"
+downstream_url = "http://127.0.0.1:8081/webhook"
+webhook_secret = "s3cret"
+allowed_updates = ["invalid_update_foo"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let err = validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(msg) if msg.contains("invalid update type")));
+
+        let toml_whitespace = toml_str.replace("invalid_update_foo", " chat_member");
+        let config_ws: Config = toml::from_str(&toml_whitespace).unwrap();
+        let err_ws = validate(&config_ws).unwrap_err();
+        assert!(
+            matches!(err_ws, ConfigError::Validation(msg) if msg.contains("invalid update type"))
+        );
     }
 
     #[test]
