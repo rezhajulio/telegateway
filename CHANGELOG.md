@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-10
+
+### Fixed
+
+- Enforce `outbox.max_pending` in a single statement (`Store::insert_with_cap`),
+  closing the check-then-insert window a concurrent burst could overshoot.
+- Spend rate-limit quota only after the dedupe lookup and the queue-cap check,
+  so duplicate redeliveries, shed updates, and insert errors no longer burn
+  tokens against a governor bucket that cannot refund them.
+- Requeue stale in-flight rows at runtime via a new periodic sweeper task
+  (`outbox.in_flight_sweep_secs`, `outbox.in_flight_max_age_secs`), so a row
+  left in flight by a failed `mark_delivered` no longer head-of-line blocks
+  its chat's queue until the next restart.
+- Treat a 4xx answer to a half-open breaker probe as reachability: the breaker
+  closes and the probed row returns to the queue instead of being dead-lettered.
+- Wake the oldest pending row when a half-open probe finds no row due, so
+  recovery is tested at cooldown cadence instead of waiting out a row backoff.
+- Accept HTTP-date `Retry-After` values (IMF-fixdate, RFC 850, asctime) in
+  addition to delta-seconds, clamped to the store's one-hour ceiling.
+- Log a startup warning when the `[admin]` token is set without `admin.listen`,
+  since `/outbox` and `/outbox/replay` then mount on the public listener.
+
+### Changed
+
+- Document that the dedupe window matches delivered-row retention, and that
+  `outbox.max_attempts` counts total attempts including the initial delivery.
+- Document the outbox in-flight sweeper settings in `config.example.toml`,
+  `README.md`, and `ARCHITECTURE.md`.
+
 ## [0.1.3] - 2026-11-09
 
 ### Changed
