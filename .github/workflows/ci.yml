@@ -104,12 +104,12 @@ jobs:
       # softprops/action-gh-release without a body would create the release
       # with empty notes.
       - name: Extract release notes
-        run: .github/release-notes.sh "${{ github.ref_name }}" > release-notes.md
+        run: .github/release-notes.sh "${{ github.ref_name }}" > "${{ runner.temp }}/release-notes.md"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          body_path: release-notes.md
+          body_path: ${{ runner.temp }}/release-notes.md
           files: target/${{ matrix.target }}/release/telegateway-${{ matrix.target }}.tar.gz
 
       - name: Publish to crates.io
