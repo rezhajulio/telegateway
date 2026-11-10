@@ -20,6 +20,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Collapse nested `if` statements in outbox dispatcher requeue logic.
 
+## [0.1.2] - 2026-11-09
+
+### Added
+
+- `bots[].allowed_updates` config: the list of update types passed to
+  Telegram `setWebhook` during auto-registration. When unset, Telegram
+  keeps its previous setting; pass `[]` for Telegram defaults. Invalid
+  update types are rejected at config validation.
+
+### Fixed
+
+- Ignore `RUSTSEC-2026-0459` (libsqlite3-sys SQLite WAL page size
+  mismatch) in `.cargo/audit.toml`; the database files live on a trusted
+  host volume and the fix requires the sqlx 0.9 upgrade.
+
+## [0.1.1] - 2026-11-07
+
+### Fixed
+
+- Dependency updates resolving 7 of 8 flagged CVEs: rustls 0.23.45 ->
+  0.23.46 (4 GHSAs), rustls-webpki 0.103.15 -> 0.103.16, webpki-roots
+  1.0.9 -> 1.0.11 (CVE-2026-111943), OpenTelemetry family 0.28 -> 0.32
+  (sdk 0.32.1 fixes CVE-2026-48504; tracing-opentelemetry 0.29 -> 0.33).
+  Same rustls updates in `example/echo-rust`. The remaining advisory,
+  RUSTSEC-2023-0071 (`rsa`), has no fixed release, is not compiled into
+  any telegateway target, and is ignored in `.cargo/audit.toml`.
+
 ## [0.1.0] - 2026-10-14
 
 First release.
@@ -86,5 +113,8 @@ First release.
 - `.gitignore` only ignores the root `config.toml`, so
   `example/config.toml` is committed.
 
-[Unreleased]: https://github.com/rezhajulio/telegateway/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rezhajulio/telegateway/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/rezhajulio/telegateway/releases/tag/v0.1.3
+[0.1.2]: https://github.com/rezhajulio/telegateway/releases/tag/v0.1.2
+[0.1.1]: https://github.com/rezhajulio/telegateway/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rezhajulio/telegateway/releases/tag/v0.1.0
