@@ -6,7 +6,7 @@
 //! A separate janitor prunes old delivered and dead rows, and a sweeper
 //! requeues stale in-flight rows so one stuck claim cannot block its chat.
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::Notify;
 
@@ -63,6 +63,22 @@ fn is_permanent(err: &DeliveryError) -> bool {
     }
 }
 
+/// Parse a `Retry-After` header: delta-seconds or an HTTP-date (RFC 9110
+/// §10.2.3 accepts the IMF-fixdate, RFC 850, and asctime forms). The result is
+/// clamped to one hour, matching the store's backoff ceiling.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    const MAX: Duration = Duration::from_secs(3600);
+    let value = value.trim();
+    let delay = match value.parse::<u64>() {
+        Ok(secs) => Duration::from_secs(secs),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO),
+    };
+    Some(delay.min(MAX))
+}
+
 /// Forward one payload to the downstream bot. Shared by the dispatcher
 /// and the replay API.
 pub async fn deliver_payload(
@@ -92,8 +108,7 @@ pub async fn deliver_payload(
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(Duration::from_secs);
+            .and_then(parse_retry_after);
         Err(DeliveryError::Status {
             status,
             retry_after,
@@ -480,13 +495,37 @@ impl DispatcherInner {
     }
 
     async fn probe(&self) -> bool {
-        let rows = match self.store.claim_due(&self.bot.id, 1).await {
+        let mut rows = match self.store.claim_due(&self.bot.id, 1).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(bot_id = %self.bot.id, error = %e, "outbox claim failed");
                 return false;
             }
         };
+        if rows.is_empty() {
+            // Every pending row may be waiting out a backoff of up to an hour,
+            // far past the breaker cooldown. Wake the oldest one so recovery is
+            // tested at cooldown cadence instead of waiting on a row timer.
+            match self.store.wake_oldest_pending(&self.bot.id).await {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(e) => {
+                    tracing::error!(
+                        bot_id = %self.bot.id,
+                        error = %e,
+                        "failed to wake a pending row for the probe"
+                    );
+                    return false;
+                }
+            }
+            rows = match self.store.claim_due(&self.bot.id, 1).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!(bot_id = %self.bot.id, error = %e, "outbox claim failed");
+                    return false;
+                }
+            };
+        }
         let Some(row) = rows.into_iter().next() else {
             return false;
         };
@@ -515,68 +554,76 @@ impl DispatcherInner {
             Err(error) => {
                 let err_str = error.to_string();
                 if is_permanent(&error) {
+                    // A 4xx answer proves the endpoint is reachable, so close
+                    // the breaker instead of leaving it half-open: there each
+                    // probe would consume and dead-letter the next row at HTTP
+                    // round-trip speed. The row goes back to the queue, where
+                    // normal delivery decides its fate (a permanent status
+                    // still dead-letters it), so one rejected payload cannot
+                    // wedge recovery.
+                    self.lock_breaker().on_success();
+                    self.record_breaker_state();
                     metrics.updates_failed.add(1, &attrs);
-                    metrics.updates_dead_lettered.add(1, &attrs);
-                    if let Err(e) = self.store.mark_dead(row.id, &err_str).await {
+                    if let Err(e) = self.store.requeue(&[row.id]).await {
                         tracing::error!(
                             bot_id = %self.bot.id,
                             update_id = row.update_id,
                             error = %e,
-                            "failed to mark permanent failure dead"
+                            "failed to requeue the probe row after a permanent error"
                         );
                     }
                     tracing::warn!(
                         bot_id = %self.bot.id,
                         update_id = row.update_id,
                         error = %err_str,
-                        "permanent probe delivery failure, dead-lettered"
+                        "probe rejected with a permanent error, breaker closed, row requeued"
                     );
-                } else {
-                    self.lock_breaker().on_failure(Instant::now());
-                    self.record_breaker_state();
-                    metrics.updates_failed.add(1, &attrs);
-                    let min_delay = match &error {
-                        DeliveryError::Status {
-                            status,
-                            retry_after,
-                        } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                            || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE =>
-                        {
-                            *retry_after
-                        }
-                        _ => None,
-                    };
-                    match self
-                        .store
-                        .mark_failed_with_min_delay(row.id, &err_str, self.max_attempts, min_delay)
-                        .await
+                    return false;
+                }
+                self.lock_breaker().on_failure(Instant::now());
+                self.record_breaker_state();
+                metrics.updates_failed.add(1, &attrs);
+                let min_delay = match &error {
+                    DeliveryError::Status {
+                        status,
+                        retry_after,
+                    } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE =>
                     {
-                        Ok(Some(delay)) => tracing::warn!(
+                        *retry_after
+                    }
+                    _ => None,
+                };
+                match self
+                    .store
+                    .mark_failed_with_min_delay(row.id, &err_str, self.max_attempts, min_delay)
+                    .await
+                {
+                    Ok(Some(delay)) => tracing::warn!(
+                        bot_id = %self.bot.id,
+                        update_id = row.update_id,
+                        attempt = row.attempts,
+                        retry_in_secs = delay.as_secs(),
+                        error = %err_str,
+                        "probe delivery failed, retrying"
+                    ),
+                    Ok(None) => {
+                        metrics.updates_dead_lettered.add(1, &attrs);
+                        tracing::warn!(
                             bot_id = %self.bot.id,
                             update_id = row.update_id,
-                            attempt = row.attempts,
-                            retry_in_secs = delay.as_secs(),
+                            attempts = row.attempts,
                             error = %err_str,
-                            "probe delivery failed, retrying"
-                        ),
-                        Ok(None) => {
-                            metrics.updates_dead_lettered.add(1, &attrs);
-                            tracing::warn!(
-                                bot_id = %self.bot.id,
-                                update_id = row.update_id,
-                                attempts = row.attempts,
-                                error = %err_str,
-                                "probe delivery failed, dead-lettered"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                bot_id = %self.bot.id,
-                                update_id = row.update_id,
-                                error = %e,
-                                "failed to record probe delivery failure"
-                            );
-                        }
+                            "probe delivery failed, dead-lettered"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            bot_id = %self.bot.id,
+                            update_id = row.update_id,
+                            error = %e,
+                            "failed to record probe delivery failure"
+                        );
                     }
                 }
             }
@@ -654,5 +701,52 @@ pub async fn janitor(
         {
             tracing::error!(error = %e, "outbox prune failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_retry_after;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn parses_delta_seconds() {
+        assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parses_http_date_into_delay() {
+        let header = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(600));
+        let parsed = parse_retry_after(&header).expect("http-date accepted");
+        assert!(
+            (560..=600).contains(&parsed.as_secs()),
+            "expected roughly 600s, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_legacy_date_formats_as_past_dates() {
+        assert_eq!(
+            parse_retry_after("Sunday, 06-Nov-94 08:49:37 GMT"),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after("Sun Nov  6 08:49:37 1994"),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn clamps_to_one_hour() {
+        assert_eq!(parse_retry_after("999999"), Some(Duration::from_secs(3600)));
+        let far = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(86_400 * 30));
+        assert_eq!(parse_retry_after(&far), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_retry_after("soon"), None);
+        assert_eq!(parse_retry_after(""), None);
     }
 }

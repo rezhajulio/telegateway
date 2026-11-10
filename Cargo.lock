@@ -2256,6 +2256,7 @@ dependencies = [
  "constant_time_eq",
  "fastrand",
  "governor",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

@@ -53,6 +53,17 @@ pub struct OutboxEntry {
 /// Statuses accepted by the list filter.
 pub const OUTBOX_STATUSES: &[&str] = &["pending", "in_flight", "delivered", "dead"];
 
+/// Result of an insert that enforces a queue cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    /// The update was stored.
+    Inserted,
+    /// The `(bot_id, update_id)` pair was already stored; a redelivery.
+    Duplicate,
+    /// The bot already has `cap` rows pending or in flight; nothing was stored.
+    CapExceeded,
+}
+
 /// SQLite-backed outbox storage. Clone is cheap: clones share the pool.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -163,6 +174,55 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() == 1)
+    }
+
+    /// Insert an accepted update only while the bot holds fewer than `cap`
+    /// pending or in-flight rows. The count and the insert run in one
+    /// statement, so a concurrent burst cannot push the queue past the cap.
+    ///
+    /// `RETURNING` distinguishes a stored row from either rejection; a zero-row
+    /// result is classified by a follow-up existence probe, which runs only on
+    /// that rare path.
+    pub async fn insert_with_cap(
+        &self,
+        bot_id: &str,
+        update_id: i64,
+        chat_key: Option<i64>,
+        payload: &str,
+        cap: u64,
+    ) -> Result<InsertOutcome, sqlx::Error> {
+        let cap = i64::try_from(cap).unwrap_or(i64::MAX);
+        let inserted: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO outbox(bot_id, update_id, chat_key, payload, created_at)
+             SELECT ?, ?, ?, ?, ?
+             WHERE (SELECT COUNT(*) FROM outbox
+                    WHERE bot_id = ? AND status IN ('pending', 'in_flight')) < ?
+             ON CONFLICT(bot_id, update_id) DO NOTHING
+             RETURNING id",
+        )
+        .bind(bot_id)
+        .bind(update_id)
+        .bind(chat_key)
+        .bind(payload)
+        .bind(now_millis())
+        .bind(bot_id)
+        .bind(cap)
+        .fetch_optional(&self.pool)
+        .await?;
+        if inserted.is_some() {
+            return Ok(InsertOutcome::Inserted);
+        }
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM outbox WHERE bot_id = ? AND update_id = ? LIMIT 1")
+                .bind(bot_id)
+                .bind(update_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(if exists.is_some() {
+            InsertOutcome::Duplicate
+        } else {
+            InsertOutcome::CapExceeded
+        })
     }
 
     /// Atomically claim due rows for one bot and bump their attempt counter.
@@ -415,6 +475,22 @@ impl Store {
         Ok(())
     }
 
+    /// Clear the backoff timer of a bot's oldest pending row so a half-open
+    /// breaker has a probe candidate instead of waiting out that row's
+    /// backoff. Returns `true` when a pending row was woken.
+    pub async fn wake_oldest_pending(&self, bot_id: &str) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE outbox SET next_attempt_at = NULL
+             WHERE id = (SELECT id FROM outbox
+                         WHERE bot_id = ? AND status = 'pending'
+                         ORDER BY id LIMIT 1)",
+        )
+        .bind(bot_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Pending row counts per bot, for the `telegateway.outbox.pending` gauge.
     pub async fn pending_counts(&self) -> Result<Vec<(String, i64)>, sqlx::Error> {
         let rows = sqlx::query(
@@ -467,7 +543,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::Store;
+    use super::{InsertOutcome, Store};
     use std::time::Duration;
 
     async fn fresh_store() -> (tempfile::TempDir, Store) {
@@ -476,6 +552,66 @@ mod tests {
         let path = path.to_str().expect("utf-8 path");
         let store = Store::open(path).await.expect("open store");
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn insert_with_cap_reports_duplicate_and_cap() {
+        let (_dir, store) = fresh_store().await;
+        assert_eq!(
+            store
+                .insert_with_cap("demo", 1, None, "{}", 1)
+                .await
+                .expect("insert"),
+            InsertOutcome::Inserted
+        );
+        // Already stored: a redelivery outranks the cap verdict.
+        assert_eq!(
+            store
+                .insert_with_cap("demo", 1, None, "{}", 1)
+                .await
+                .expect("insert"),
+            InsertOutcome::Duplicate
+        );
+        // New update while the queue is at its cap.
+        assert_eq!(
+            store
+                .insert_with_cap("demo", 2, None, "{}", 1)
+                .await
+                .expect("insert"),
+            InsertOutcome::CapExceeded
+        );
+        assert_eq!(store.pending_total("demo").await.expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_with_cap_holds_under_concurrent_burst() {
+        let (_dir, store) = fresh_store().await;
+        let mut set = tokio::task::JoinSet::new();
+        for update_id in 0..24 {
+            let store = store.clone();
+            set.spawn(async move {
+                store
+                    .insert_with_cap("demo", update_id, None, "{}", 10)
+                    .await
+                    .expect("insert")
+            });
+        }
+        let mut inserted = 0;
+        let mut shed = 0;
+        while let Some(outcome) = set.join_next().await {
+            match outcome.expect("task") {
+                InsertOutcome::Inserted => inserted += 1,
+                InsertOutcome::CapExceeded => shed += 1,
+                InsertOutcome::Duplicate => panic!("distinct update ids cannot duplicate"),
+            }
+        }
+        assert_eq!(inserted, 10, "only the cap's worth lands");
+        assert_eq!(shed, 14);
+        assert_eq!(
+            store.pending_total("demo").await.expect("count"),
+            10,
+            "concurrent inserts must not overshoot the cap"
+        );
     }
 
     #[tokio::test]

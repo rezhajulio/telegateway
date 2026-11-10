@@ -10,7 +10,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::{app::AppState, telegram};
+use crate::{app::AppState, outbox::InsertOutcome, telegram};
 
 /// Telegram's header carrying the webhook secret configured via `setWebhook`.
 const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
@@ -82,12 +82,13 @@ pub async fn webhook_handler(
     // governor has no refund, so every check that can reject an update
     // without inserting it runs first. Redeliveries already in the outbox
     // never reach `admit`, and an outbox-full 503 sheds without burning
-    // quota. This is best-effort, not race-free: two concurrent redeliveries
-    // of the same `update_id` can both miss `find_payload`, both spend a
-    // token, and then have `INSERT OR IGNORE` keep only one row; the
-    // `pending_total` check can likewise pass for inserts that race it, and
-    // an insert error after `admit` cannot give the token back. Only the
-    // outbox itself closes those windows.
+    // quota. Two concurrent redeliveries of the same `update_id` can still
+    // both miss `find_payload` and both spend a token; `INSERT OR IGNORE`
+    // keeps one row. The cap itself is enforced atomically by
+    // `insert_with_cap`, so the `pending_total` check below is only a cheap
+    // pre-filter to keep the common shed path from spending a token. An
+    // insert that loses the cap race after `admit` cannot give the token
+    // back.
     match state.store.find_payload(&bot_id, envelope.update_id).await {
         Ok(Some(_)) => {
             tracing::debug!(
@@ -109,7 +110,8 @@ pub async fn webhook_handler(
         }
     }
 
-    // (b) Queue cap check before admission, so a shed update burns no quota.
+    // (b) Queue cap pre-check before admission, so a shed update burns no
+    // quota. `insert_with_cap` in (d) is the authoritative, atomic cap.
     match state.store.pending_total(&bot_id).await {
         Ok(pending) if (pending as u64) >= state.max_pending => {
             tracing::warn!(
@@ -144,13 +146,20 @@ pub async fn webhook_handler(
         return (StatusCode::OK, "rate limited").into_response();
     }
 
-    // (d) Persist original payload bytes. INSERT OR IGNORE guards concurrent races.
+    // (d) Persist original payload bytes. The count-and-insert happens in one
+    // statement, so concurrent handlers cannot overshoot `max_pending`.
     match state
         .store
-        .insert(&bot_id, envelope.update_id, envelope.chat_key, body_str)
+        .insert_with_cap(
+            &bot_id,
+            envelope.update_id,
+            envelope.chat_key,
+            body_str,
+            state.max_pending,
+        )
         .await
     {
-        Ok(true) => {
+        Ok(InsertOutcome::Inserted) => {
             crate::otel::metrics()
                 .updates_accepted
                 .add(1, &crate::otel::bot_attrs(&bot_id));
@@ -162,12 +171,23 @@ pub async fn webhook_handler(
                 "update accepted"
             );
         }
-        Ok(false) => {
+        Ok(InsertOutcome::Duplicate) => {
             tracing::debug!(
                 bot_id = %bot_id,
                 update_id = envelope.update_id,
                 "duplicate update ignored"
             );
+        }
+        Ok(InsertOutcome::CapExceeded) => {
+            // Lost the cap race after `admit` spent its token. The row was not
+            // stored, so Telegram's retry can still land it.
+            tracing::warn!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                max_pending = state.max_pending,
+                "outbox full"
+            );
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox full").into_response();
         }
         Err(err) => {
             tracing::error!(

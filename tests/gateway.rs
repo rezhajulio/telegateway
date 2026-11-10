@@ -748,6 +748,40 @@ async fn queue_cap_returns_503_when_max_pending_reached() {
 }
 
 #[tokio::test]
+async fn queue_cap_holds_under_concurrent_burst() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config_with_admin(downstream, 30, false, None, 5);
+    let built = app::build_router(config).await.unwrap();
+
+    let mut set = tokio::task::JoinSet::new();
+    for id in 0..20 {
+        let router = built.router.clone();
+        set.spawn(async move {
+            router
+                .oneshot(authed("/webhooks/demo", update(400 + id, 7)))
+                .await
+                .unwrap()
+        });
+    }
+    let mut shed = 0;
+    while let Some(resp) = set.join_next().await {
+        let status = resp.unwrap().status();
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            shed += 1;
+        } else {
+            assert_eq!(status, StatusCode::OK, "unexpected status {status}");
+        }
+    }
+
+    assert_eq!(shed, 15, "every request past the cap is shed");
+    assert_eq!(
+        built.store.pending_total("demo").await.unwrap(),
+        5,
+        "concurrent webhook calls must not overshoot max_pending"
+    );
+}
+
+#[tokio::test]
 async fn queue_cap_shed_does_not_burn_rate_limit_quota() {
     let (downstream, mut rx) = stub_downstream().await;
     // Two tokens for chat 7, and room for exactly one pending update.

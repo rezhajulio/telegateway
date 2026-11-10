@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use telegateway::{
     config::BotConfig,
@@ -413,6 +413,102 @@ async fn breaker_probe_recovers_and_wakes_queue() {
     assert_eq!(d.drain_once().await, 1);
     assert_eq!(hits.load(Ordering::SeqCst), 3);
     assert_eq!(store.status_of("demo", 2).await.unwrap(), "delivered");
+}
+
+#[tokio::test]
+async fn probe_wakes_a_row_whose_backoff_outlasts_the_cooldown() {
+    let (downstream, _rx, hits) = stub_counting_downstream(1).await;
+    let db = TestDb::new();
+    let store = Store::open(db.path()).await.unwrap();
+    store.insert("demo", 1, None, "{}").await.unwrap();
+
+    let d = dispatcher_with_breaker(
+        store.clone(),
+        test_bot(downstream),
+        10,
+        1,
+        Duration::from_millis(100),
+    );
+    // First delivery fails, opening the breaker and backing the row off.
+    assert_eq!(d.drain_once().await, 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // The cooldown elapses long before the row's own backoff does.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(d.decide(), Decision::Probe);
+
+    // The probe wakes that row rather than idling until its timer expires.
+    assert!(d.probe().await, "probe must find the woken row");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(store.status_of("demo", 1).await.unwrap(), "delivered");
+}
+
+#[tokio::test]
+async fn probe_permanent_error_closes_breaker_without_dead_lettering() {
+    let counter = Arc::new(AtomicU64::new(0));
+    let router = axum::Router::new().route(
+        "/webhook",
+        axum::routing::post({
+            let counter = counter.clone();
+            move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    axum::http::StatusCode::BAD_REQUEST
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let db = TestDb::new();
+    let store = Store::open(db.path()).await.unwrap();
+    store
+        .insert("demo", 1, None, r#"{"bad":true}"#)
+        .await
+        .unwrap();
+
+    // Start half-open: one failure opened the breaker, cooldown already over.
+    let mut breaker = CircuitBreaker::new(
+        "demo".to_owned(),
+        1,
+        Duration::from_millis(1),
+        Duration::from_millis(4),
+    );
+    breaker.on_failure(Instant::now());
+    let d = Dispatcher::new(
+        store.clone(),
+        reqwest::Client::new(),
+        test_bot(format!("http://{addr}/webhook")),
+        5,
+        Duration::from_millis(50),
+        Arc::new(Notify::new()),
+        breaker,
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(d.decide(), Decision::Probe);
+
+    assert!(!d.probe().await, "rejected probe did not confirm health");
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.status_of("demo", 1).await.unwrap(),
+        "pending",
+        "a probe must not dead-letter the row it tested"
+    );
+    assert_eq!(
+        d.decide(),
+        Decision::Allow,
+        "a 4xx answer proves reachability, so the breaker closes"
+    );
+
+    // Normal delivery owns the row's fate from here.
+    assert_eq!(d.drain_once().await, 1);
+    assert_eq!(store.status_of("demo", 1).await.unwrap(), "dead");
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
