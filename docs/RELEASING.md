@@ -51,6 +51,9 @@ enforce this, it publishes whatever `Cargo.toml` says.
 - `cargo publish` runs **before** the GitHub Release is created, so a
   publish failure leaves no half-made release. Fix the cause, bump the
   version if the failed version already reached crates.io, and tag again.
+- The GitHub Release notes are extracted from `CHANGELOG.md` by
+  `.github/release-notes.sh`. Tagging a version with no changelog section
+  fails the release job with an error telling you to add one.
 - A version that reached crates.io cannot be overwritten. If it is broken,
   release a fixed version, and optionally `cargo yank` the broken one
   (yanked versions stay downloadable for existing lockfiles but are not

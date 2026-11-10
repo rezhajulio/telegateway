@@ -100,9 +100,16 @@ jobs:
       # Upload before publishing: crates.io versions are immutable and the
       # publish can fail for account reasons, which must not strand the
       # GitHub release without its binaries.
+      # The notes body is extracted from CHANGELOG.md by release-notes.sh;
+      # softprops/action-gh-release without a body would create the release
+      # with empty notes.
+      - name: Extract release notes
+        run: .github/release-notes.sh "${{ github.ref_name }}" > release-notes.md
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: target/${{ matrix.target }}/release/telegateway-${{ matrix.target }}.tar.gz
 
       - name: Publish to crates.io
