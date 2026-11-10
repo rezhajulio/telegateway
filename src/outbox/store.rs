@@ -79,7 +79,7 @@ impl Store {
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         let store = Self { pool };
-        store.reset_in_flight().await?;
+        store.reset_in_flight(None).await?;
         Ok(store)
     }
 
@@ -104,20 +104,43 @@ impl Store {
         Ok(())
     }
 
-    /// Requeue rows left `in_flight` by a previous run as `pending`, keeping
-    /// their `next_attempt_at` backoff and attempt count untouched so
-    /// a crash-looping row does not retry without backoff.
-    async fn reset_in_flight(&self) -> Result<(), sqlx::Error> {
-        let res = sqlx::query("UPDATE outbox SET status = 'pending' WHERE status = 'in_flight'")
-            .execute(&self.pool)
-            .await?;
-        if res.rows_affected() > 0 {
-            tracing::info!(
-                requeued = res.rows_affected(),
-                "outbox: requeued in-flight updates from previous run"
+    /// Requeue `in_flight` rows back to `pending`, keeping their attempt
+    /// count and backoff untouched so a crash-looping row does not retry
+    /// without backoff. With `stale_after`, only rows claimed longer ago than
+    /// that are requeued (the runtime sweeper); without it, every `in_flight`
+    /// row is requeued (startup recovery).
+    ///
+    /// `claim_due` stamps `next_attempt_at` with the claim time while a row is
+    /// `in_flight`, so it doubles as the staleness clock here.
+    pub async fn reset_in_flight(&self, stale_after: Option<Duration>) -> Result<u64, sqlx::Error> {
+        let res = match stale_after {
+            Some(max_age) => {
+                let max_age_ms = i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX);
+                let cutoff = now_millis().saturating_sub(max_age_ms);
+                sqlx::query(
+                    "UPDATE outbox SET status = 'pending'
+                     WHERE status = 'in_flight'
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
+                )
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query("UPDATE outbox SET status = 'pending' WHERE status = 'in_flight'")
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        let requeued = res.rows_affected();
+        if requeued > 0 {
+            tracing::warn!(
+                requeued,
+                stale_only = stale_after.is_some(),
+                "outbox: requeued in-flight updates"
             );
         }
-        Ok(())
+        Ok(requeued)
     }
     /// Insert an accepted update with an optional chat key. Returns `false` when
     /// the `(bot_id, update_id)` pair is already queued: a Telegram redelivery.
@@ -147,7 +170,11 @@ impl Store {
     pub async fn claim_due(&self, bot_id: &str, limit: i64) -> Result<Vec<OutboxRow>, sqlx::Error> {
         let now = now_millis();
         let rows = sqlx::query(
-            "UPDATE outbox SET status = 'in_flight', attempts = attempts + 1
+            // `next_attempt_at` doubles as the claim stamp while in_flight:
+            // the sweeper requeues rows whose stamp is older than its
+            // threshold, unblocking per-chat ordering.
+            "UPDATE outbox SET status = 'in_flight', attempts = attempts + 1,
+                  next_attempt_at = ?
              WHERE id IN (
                SELECT o.id FROM outbox o
                WHERE o.bot_id = ? AND o.status = 'pending'
@@ -162,6 +189,7 @@ impl Store {
              )
              RETURNING id, bot_id, update_id, chat_key, payload, attempts",
         )
+        .bind(now)
         .bind(bot_id)
         .bind(now)
         .bind(now)
@@ -434,5 +462,56 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         Ok(row.get("status"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+    use std::time::Duration;
+
+    async fn fresh_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outbox.db");
+        let path = path.to_str().expect("utf-8 path");
+        let store = Store::open(path).await.expect("open store");
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn sweep_requeues_only_stale_claims_and_keeps_attempts() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .insert("demo", 1, Some(7), "{}")
+            .await
+            .expect("insert");
+
+        let claimed = store.claim_due("demo", 32).await.expect("claim");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].attempts, 1);
+
+        // A fresh claim is not stale yet and must stay in_flight.
+        let requeued = store
+            .reset_in_flight(Some(Duration::from_secs(600)))
+            .await
+            .expect("sweep");
+        assert_eq!(requeued, 0);
+        assert_eq!(
+            store.status_of("demo", 1).await.expect("status"),
+            "in_flight"
+        );
+
+        // Past the threshold the row goes back to pending.
+        let requeued = store
+            .reset_in_flight(Some(Duration::ZERO))
+            .await
+            .expect("sweep");
+        assert_eq!(requeued, 1);
+        assert_eq!(store.status_of("demo", 1).await.expect("status"), "pending");
+
+        // Attempt count survives, so repeated stale claims still dead-letter.
+        let reclaimed = store.claim_due("demo", 32).await.expect("reclaim");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].attempts, 2);
     }
 }

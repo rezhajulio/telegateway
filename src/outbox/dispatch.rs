@@ -3,7 +3,8 @@
 //! Asynchronous delivery: one task per bot drains its outbox rows,
 //! forwarding each downstream with retries. A circuit breaker per bot
 //! stops delivery attempts entirely while the downstream is known down.
-//! A separate janitor prunes old delivered and dead rows.
+//! A separate janitor prunes old delivered and dead rows, and a sweeper
+//! requeues stale in-flight rows so one stuck claim cannot block its chat.
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -583,8 +584,42 @@ impl DispatcherInner {
         true
     }
 }
+
+/// Periodically requeue `in_flight` rows whose claim is older than `max_age`
+/// back to `pending`. A row whose delivery task died, or whose
+/// `mark_delivered` gave up on a wedged database, would otherwise stay
+/// `in_flight` forever and head-of-line block later updates in its chat.
+/// Attempt counts are preserved, so a crash-looping row still dead-letters.
+/// Exits gracefully when shutdown is signaled.
+pub async fn in_flight_sweeper(
+    store: Store,
+    sweep_interval: Duration,
+    max_age: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(sweep_interval.max(Duration::from_secs(1)));
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            _ = interval.tick() => {}
+        }
+        if *shutdown.borrow() {
+            break;
+        }
+        if let Err(e) = store.reset_in_flight(Some(max_age)).await {
+            tracing::error!(error = %e, "outbox in-flight sweep failed");
+        }
+    }
+}
+
 /// Periodically prune delivered rows older than `delivered_retention_days`
-/// and dead letters older than 30 days or beyond `max_dead_per_bot` per bot. Exits gracefully when shutdown is signaled.
+/// and dead letters older than 30 days or beyond `max_dead_per_bot` per bot.
+/// Exits gracefully when shutdown is signaled.
 pub async fn janitor(
     store: Store,
     delivered_retention_days: u64,

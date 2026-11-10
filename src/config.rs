@@ -128,6 +128,16 @@ pub struct OutboxConfig {
     /// Maximum concurrent row deliveries in flight per bot across different chats.
     #[serde(default = "default_delivery_concurrency")]
     pub delivery_concurrency: usize,
+    /// How often the runtime sweeper looks for stale `in_flight` rows, in
+    /// seconds. A row left `in_flight` by a failed state transition blocks
+    /// later updates in its chat until it is requeued.
+    #[serde(default = "default_in_flight_sweep_secs")]
+    pub in_flight_sweep_secs: u64,
+    /// An `in_flight` row claimed longer ago than this, in seconds, is
+    /// requeued as `pending` by the sweeper. Keep it above the delivery
+    /// timeout so a slow downstream is not duplicated.
+    #[serde(default = "default_in_flight_max_age_secs")]
+    pub in_flight_max_age_secs: u64,
 }
 
 impl Default for OutboxConfig {
@@ -140,6 +150,8 @@ impl Default for OutboxConfig {
             max_pending: default_max_pending(),
             max_dead_letters: default_max_dead_letters(),
             delivery_concurrency: default_delivery_concurrency(),
+            in_flight_sweep_secs: default_in_flight_sweep_secs(),
+            in_flight_max_age_secs: default_in_flight_max_age_secs(),
         }
     }
 }
@@ -154,6 +166,14 @@ fn default_max_dead_letters() -> u64 {
 
 fn default_delivery_concurrency() -> usize {
     1
+}
+
+fn default_in_flight_sweep_secs() -> u64 {
+    60
+}
+
+fn default_in_flight_max_age_secs() -> u64 {
+    600
 }
 
 fn default_outbox_path() -> String {
@@ -401,6 +421,18 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "`outbox.delivery_concurrency` must be between 1 and 64".to_owned(),
         ));
     }
+
+    if !(1..=3600).contains(&config.outbox.in_flight_sweep_secs) {
+        return Err(ConfigError::Validation(
+            "`outbox.in_flight_sweep_secs` must be between 1 and 3600".to_owned(),
+        ));
+    }
+
+    if !(1..=86_400).contains(&config.outbox.in_flight_max_age_secs) {
+        return Err(ConfigError::Validation(
+            "`outbox.in_flight_max_age_secs` must be between 1 and 86400".to_owned(),
+        ));
+    }
     if config.circuit_breaker.failure_threshold == 0 {
         return Err(ConfigError::Validation(
             "`circuit_breaker.failure_threshold` must be at least 1".to_owned(),
@@ -544,6 +576,8 @@ rate_limit_per_minute = 30
         assert_eq!(config.outbox.poll_interval_ms, 1000);
         assert_eq!(config.outbox.delivered_retention_days, 7);
         assert_eq!(config.outbox.delivery_concurrency, 1);
+        assert_eq!(config.outbox.in_flight_sweep_secs, 60);
+        assert_eq!(config.outbox.in_flight_max_age_secs, 600);
     }
 
     #[test]
@@ -823,6 +857,44 @@ webhook_secret = "other"
         assert!(validate(&config).is_err());
 
         let text = format!("{}\n[outbox]\ndelivery_concurrency = 65\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_outbox_in_flight_sweep_secs() {
+        let text = format!("{}\n[outbox]\nin_flight_sweep_secs = 300\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.outbox.in_flight_sweep_secs, 300);
+
+        let text = format!("{}\n[outbox]\nin_flight_sweep_secs = 0\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+
+        let text = format!("{}\n[outbox]\nin_flight_sweep_secs = 3601\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_outbox_in_flight_max_age_secs() {
+        let text = format!(
+            "{}\n[outbox]\nin_flight_max_age_secs = 1200\n",
+            valid_toml()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.outbox.in_flight_max_age_secs, 1200);
+
+        let text = format!("{}\n[outbox]\nin_flight_max_age_secs = 0\n", valid_toml());
+        let config: Config = toml::from_str(&text).unwrap();
+        assert!(validate(&config).is_err());
+
+        let text = format!(
+            "{}\n[outbox]\nin_flight_max_age_secs = 86401\n",
+            valid_toml()
+        );
         let config: Config = toml::from_str(&text).unwrap();
         assert!(validate(&config).is_err());
     }
