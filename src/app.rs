@@ -153,6 +153,12 @@ pub async fn build_router(config: Config) -> anyhow::Result<BuiltApp> {
                 .route("/readyz", get(routes::health::readyz))
                 .route("/webhooks/{bot_id}", post(routes::webhook::webhook_handler));
             if state.admin_token.is_some() {
+                tracing::warn!(
+                    "admin routes (/outbox, /outbox/replay) are mounted on the public listener \
+                     because [admin] token is set but admin.listen is not; these endpoints are \
+                     reachable by anyone who can reach `listen` — set a dedicated admin.listen \
+                     to isolate them"
+                );
                 router = router
                     .route("/outbox", get(routes::admin::list_outbox))
                     .route("/outbox/replay", post(routes::admin::replay));
