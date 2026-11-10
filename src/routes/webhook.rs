@@ -10,7 +10,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::{app::AppState, telegram};
+use crate::{app::AppState, outbox::InsertOutcome, telegram};
 
 /// Telegram's header carrying the webhook secret configured via `setWebhook`.
 const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
@@ -78,9 +78,17 @@ pub async fn webhook_handler(
 
     tracing::Span::current().record("update_id", envelope.update_id);
 
-    // Telegram redeliveries (duplicates) must not burn rate-limit quota,
-    // and rate-limited updates must not be persisted into the outbox.
-    // (a) Duplicate check: if update is already stored, answer 200 without consuming quota.
+    // Ordering note: `admit` spends a token from the chat's bucket and
+    // governor has no refund, so every check that can reject an update
+    // without inserting it runs first. Redeliveries already in the outbox
+    // never reach `admit`, and an outbox-full 503 sheds without burning
+    // quota. Two concurrent redeliveries of the same `update_id` can still
+    // both miss `find_payload` and both spend a token; `INSERT OR IGNORE`
+    // keeps one row. The cap itself is enforced atomically by
+    // `insert_with_cap`, so the `pending_total` check below is only a cheap
+    // pre-filter to keep the common shed path from spending a token. An
+    // insert that loses the cap race after `admit` cannot give the token
+    // back.
     match state.store.find_payload(&bot_id, envelope.update_id).await {
         Ok(Some(_)) => {
             tracing::debug!(
@@ -102,20 +110,10 @@ pub async fn webhook_handler(
         }
     }
 
-    // (b) Admission policy: rate limit check for new updates.
-    if !state.policy.admit(&bot_id, envelope.chat_key) {
-        tracing::warn!(
-            bot_id = %bot_id,
-            update_id = envelope.update_id,
-            chat_key = ?envelope.chat_key,
-            "rejected: rate limited"
-        );
-        return (StatusCode::OK, "rate limited").into_response();
-    }
-
-    // (c) Queue cap check before persisting:
+    // (b) Queue cap pre-check before admission, so a shed update burns no
+    // quota. `insert_with_cap` in (d) is the authoritative, atomic cap.
     match state.store.pending_total(&bot_id).await {
-        Ok(pending) if pending >= 0 && (pending as u64) >= state.max_pending => {
+        Ok(pending) if (pending as u64) >= state.max_pending => {
             tracing::warn!(
                 bot_id = %bot_id,
                 pending,
@@ -135,13 +133,33 @@ pub async fn webhook_handler(
         }
     }
 
-    // (d) Persist original payload bytes. INSERT OR IGNORE guards concurrent races.
+    // (c) Admission policy: rate limit check for new updates. This spends a
+    // token, and only the insert below can still fail (503, token stays
+    // spent). The error path is rare; the cheap rejections already returned.
+    if !state.policy.admit(&bot_id, envelope.chat_key) {
+        tracing::warn!(
+            bot_id = %bot_id,
+            update_id = envelope.update_id,
+            chat_key = ?envelope.chat_key,
+            "rejected: rate limited"
+        );
+        return (StatusCode::OK, "rate limited").into_response();
+    }
+
+    // (d) Persist original payload bytes. The count-and-insert happens in one
+    // statement, so concurrent handlers cannot overshoot `max_pending`.
     match state
         .store
-        .insert(&bot_id, envelope.update_id, envelope.chat_key, body_str)
+        .insert_with_cap(
+            &bot_id,
+            envelope.update_id,
+            envelope.chat_key,
+            body_str,
+            state.max_pending,
+        )
         .await
     {
-        Ok(true) => {
+        Ok(InsertOutcome::Inserted) => {
             crate::otel::metrics()
                 .updates_accepted
                 .add(1, &crate::otel::bot_attrs(&bot_id));
@@ -153,12 +171,23 @@ pub async fn webhook_handler(
                 "update accepted"
             );
         }
-        Ok(false) => {
+        Ok(InsertOutcome::Duplicate) => {
             tracing::debug!(
                 bot_id = %bot_id,
                 update_id = envelope.update_id,
                 "duplicate update ignored"
             );
+        }
+        Ok(InsertOutcome::CapExceeded) => {
+            // Lost the cap race after `admit` spent its token. The row was not
+            // stored, so Telegram's retry can still land it.
+            tracing::warn!(
+                bot_id = %bot_id,
+                update_id = envelope.update_id,
+                max_pending = state.max_pending,
+                "outbox full"
+            );
+            return (StatusCode::SERVICE_UNAVAILABLE, "outbox full").into_response();
         }
         Err(err) => {
             tracing::error!(

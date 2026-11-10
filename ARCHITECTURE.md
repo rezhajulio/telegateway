@@ -95,7 +95,7 @@ Response contract with Telegram:
 | `routes::webhook` | The ingress handler: authenticate → adapt → admit → persist → log.    |
 | `routes::admin`   | `/outbox` listing and `/outbox/replay`, bearer-token guarded.          |
 | `outbox::store`   | SQLite persistence: insert, atomic claim, retry bookkeeping, prune.    |
-| `outbox::dispatch`| Per-bot delivery tasks with exponential-backoff retries; janitor.     |
+| `outbox::dispatch`| Per-bot delivery tasks with exponential-backoff retries; janitor and stale-claim sweeper. |
 | `outbox::breaker` | Per-bot circuit breaker: fast-fail while downstream is down.          |
 | `telegram`        | Adapter: raw Telegram JSON → routing envelope.                        |
 | `policy`          | Per-bot, per-chat token-bucket admission control.                     |
@@ -119,9 +119,13 @@ before answering Telegram, so a crashed or downed bot loses nothing.
 - **Retries** back off exponentially (5s doubling, ±20% jitter, capped at
   1h). After `outbox.max_attempts` failures the row is dead-lettered with
   its last error; `GET /outbox` lists the trail.
-- **Crashes**: on open, rows left `in_flight` are requeued as `pending`,
-  preserving existing backoff. Delivery is at-least-once; downstream bots
-  dedupe on `update_id`.
+- **Crashes and stuck claims**: on open, rows left `in_flight` are requeued
+  as `pending`, preserving existing backoff. At runtime a sweeper requeues
+  `in_flight` rows whose claim is older than `outbox.in_flight_max_age_secs`
+  (default 600) every `outbox.in_flight_sweep_secs` (default 60), so one
+  stuck claim cannot head-of-line block later updates in its chat. Attempts
+  and backoff are preserved, so a crash-looping row still dead-letters.
+  Delivery is at-least-once; downstream bots dedupe on `update_id`.
 - **Circuit breaker**: each bot has an in-memory breaker (closed → open →
   half-open). After `circuit_breaker.failure_threshold` consecutive
   failures the dispatcher stops attempting delivery entirely instead of

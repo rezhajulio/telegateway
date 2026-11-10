@@ -86,6 +86,23 @@ async fn run_gateway(cfg: config::Config) -> anyhow::Result<()> {
         Ok("janitor")
     });
 
+    // Spawn in-flight sweeper: a row stuck `in_flight` blocks later updates
+    // in its chat, so requeue stale claims instead of waiting for a restart.
+    let sweeper_store = built.store.clone();
+    let sweeper_interval = Duration::from_secs(cfg.outbox.in_flight_sweep_secs);
+    let sweeper_max_age = Duration::from_secs(cfg.outbox.in_flight_max_age_secs);
+    let sweeper_rx = shutdown_rx.clone();
+    workers.spawn(async move {
+        outbox::dispatch::in_flight_sweeper(
+            sweeper_store,
+            sweeper_interval,
+            sweeper_max_age,
+            sweeper_rx,
+        )
+        .await;
+        Ok("in_flight_sweeper")
+    });
+
     // Gauge task: refresh telegateway.outbox.pending, recording 0 for absent bots
     let gauge_store = built.store.clone();
     let gauge_bots: Vec<String> = cfg.bots.iter().map(|b| b.id.clone()).collect();

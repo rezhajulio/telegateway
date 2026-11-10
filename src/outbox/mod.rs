@@ -12,7 +12,7 @@ mod store;
 
 pub use breaker::{CircuitBreaker, Decision};
 pub use dispatch::{DeliveryError, Dispatcher, deliver_payload};
-pub use store::{OUTBOX_STATUSES, OutboxEntry, OutboxRow, Store};
+pub use store::{InsertOutcome, OUTBOX_STATUSES, OutboxEntry, OutboxRow, Store};
 
 /// Exponential backoff with jitter for a 1-based attempt number:
 /// 5s, 10s, 20s, ... capped at 1h, plus or minus 20%.

@@ -12,6 +12,8 @@ listen = "127.0.0.1:8080"
 # max_pending = 10000        # webhook sheds with 503 when pending+in_flight reaches this
 # max_dead_letters = 10000   # dead letters kept per bot (oldest pruned first)
 # delivery_concurrency = 1   # max concurrent deliveries per bot across chats (downstream will see up to N concurrent requests)
+# in_flight_sweep_secs = 60  # how often to look for stale in_flight rows (1-3600)
+# in_flight_max_age_secs = 600  # requeue an in_flight row claimed longer ago than this (1-86400; keep above the delivery timeout)
 # Circuit breaker per downstream bot: after this many consecutive
 # failures, delivery pauses for cooldown_secs, then a probe goes out.
 # [circuit_breaker]

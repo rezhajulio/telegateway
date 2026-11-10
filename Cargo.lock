@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "telegateway"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2256,6 +2256,7 @@ dependencies = [
  "constant_time_eq",
  "fastrand",
  "governor",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

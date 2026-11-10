@@ -80,7 +80,9 @@ or, when absent, the sending user; duplicate updates are checked before quota
 is consumed, and limiter state is pruned hourly. Forwarded requests carry
 `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery ordering is
 at-least-once, per-bot sequential, best-effort (retries can reorder); downstream
-bots must deduplicate on `update_id`.
+bots must deduplicate on `update_id`. Dedupe window equals delivered-row
+retention: rows are pruned after `outbox.delivered_retention_days` (default `7`),
+so redeliveries of older updates are re-processed — at-least-once semantics.
 
 ### Dead letters
 
@@ -97,7 +99,9 @@ listen = "127.0.0.1:8080"
 
 [outbox]
 path = "outbox.db"          # SQLite file holding queued updates
-max_attempts = 25           # retries before dead-lettering
+max_attempts = 25           # total attempts (including the first) before dead-lettering
+in_flight_sweep_secs = 60   # how often to requeue stale in-flight rows
+in_flight_max_age_secs = 600 # an in-flight claim older than this is requeued
 
 # [admin]
 # token = "change-me-to-a-long-random-value-at-least-32-chars"
@@ -113,12 +117,14 @@ rate_limit_per_minute = 30
 | ---------------------------- | ----------------------------------------------------------- |
 | `listen`                     | Socket address to bind (default `127.0.0.1:8080`).           |
 | `outbox.path`                | SQLite file for the durable outbox (default `outbox.db`).   |
-| `outbox.max_attempts`         | Delivery retries before dead-lettering (default `25`).      |
+| `outbox.max_attempts`         | Total delivery attempts, including the initial one, before dead-lettering (default `25`). |
 | `outbox.poll_interval_ms`    | Retry sweep interval (default `1000`).                      |
 | `outbox.delivered_retention_days` | Prune delivered rows after N days (default `7`; dead letters after 30; 1–36500). |
 | `outbox.max_pending`         | Max pending+in-flight rows per bot before 503 shedding (default `10000`, min `1`). |
 | `outbox.max_dead_letters`    | Dead letters kept per bot; oldest beyond this are pruned hourly (default `10000`, min `1`). |
 | `outbox.delivery_concurrency` | Max concurrent deliveries per bot across different chats (default `1`, 1–64; downstream will see up to N concurrent requests). |
+| `outbox.in_flight_sweep_secs` | How often the runtime sweeper looks for stale in-flight rows (default `60`, 1–3600). |
+| `outbox.in_flight_max_age_secs` | In-flight rows claimed longer ago than this are requeued as pending, keeping attempts and backoff (default `600`, 1–86400; keep above the 25s delivery timeout so a slow downstream is not duplicated). |
 | `circuit_breaker.failure_threshold` | Consecutive failures that trip the breaker (default `5`, min `1`). |
 | `circuit_breaker.cooldown_secs` | Pause before a recovery probe (default `60`, min `1`). |
 | `circuit_breaker.max_cooldown_secs` | Cap for doubling cooldown (default `600`, must be `>= cooldown_secs`). |

@@ -35,7 +35,10 @@ Accepted updates are delivered to the downstream bot asynchronously with
 retries. The `200` means "durable", not "delivered". Forwarded requests
 carry `X-Telegateway-Bot` and `X-Telegateway-Update-Id` headers. Delivery ordering
 is at-least-once, per-bot sequential, best-effort order (retries reorder):
-downstream bots must deduplicate on `update_id`. Outbound requests do not follow
+downstream bots must deduplicate on `update_id`. The dedupe window equals
+delivered-row retention: rows are pruned after `outbox.delivered_retention_days`
+(default 7), so redeliveries of older updates are re-processed — at-least-once
+semantics. Outbound requests do not follow
 redirects, enforce a 5s connect timeout, and report 504 on timeout.
 Downstream 4xx responses (except 408/425/429) dead-letter immediately and do not
 trip the circuit breaker. `Retry-After` headers on 429/503 are honored. Delivery

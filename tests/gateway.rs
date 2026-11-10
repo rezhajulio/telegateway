@@ -748,6 +748,96 @@ async fn queue_cap_returns_503_when_max_pending_reached() {
 }
 
 #[tokio::test]
+async fn queue_cap_holds_under_concurrent_burst() {
+    let (downstream, _rx) = stub_downstream().await;
+    let (_tmp, config) = test_config_with_admin(downstream, 30, false, None, 5);
+    let built = app::build_router(config).await.unwrap();
+
+    let mut set = tokio::task::JoinSet::new();
+    for id in 0..20 {
+        let router = built.router.clone();
+        set.spawn(async move {
+            router
+                .oneshot(authed("/webhooks/demo", update(400 + id, 7)))
+                .await
+                .unwrap()
+        });
+    }
+    let mut shed = 0;
+    while let Some(resp) = set.join_next().await {
+        let status = resp.unwrap().status();
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            shed += 1;
+        } else {
+            assert_eq!(status, StatusCode::OK, "unexpected status {status}");
+        }
+    }
+
+    assert_eq!(shed, 15, "every request past the cap is shed");
+    assert_eq!(
+        built.store.pending_total("demo").await.unwrap(),
+        5,
+        "concurrent webhook calls must not overshoot max_pending"
+    );
+}
+
+#[tokio::test]
+async fn queue_cap_shed_does_not_burn_rate_limit_quota() {
+    let (downstream, mut rx) = stub_downstream().await;
+    // Two tokens for chat 7, and room for exactly one pending update.
+    let (_tmp, config) = test_config_with_admin(downstream, 2, false, None, 1);
+    let built = app::build_router(config).await.unwrap();
+
+    // 201 spends the first token and fills the queue.
+    let resp1 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(301, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    // 202 is shed by the cap check; it must not spend the second token.
+    let resp2 = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(302, 7)))
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        built.store.find_payload("demo", 302).await.unwrap(),
+        None,
+        "shed update must not be persisted"
+    );
+
+    // Draining frees the queue. The retry of 302 must be admitted and stored:
+    // if the shed had burned a token, the bucket would be empty and the retry
+    // would be rate-limited instead.
+    built.dispatchers[0].drain_once().await;
+    let delivered = rx.recv().await.expect("update 301 delivered");
+    let body: serde_json::Value = serde_json::from_str(&delivered).unwrap();
+    assert_eq!(body["update_id"], 301);
+
+    let retry = built
+        .router
+        .clone()
+        .oneshot(authed("/webhooks/demo", update(302, 7)))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert!(
+        built
+            .store
+            .find_payload("demo", 302)
+            .await
+            .unwrap()
+            .is_some(),
+        "retry after shed must be stored; the shed must not burn quota"
+    );
+}
+
+#[tokio::test]
 async fn admin_replay_without_token_returns_401_before_body_parsing() {
     let (downstream, _rx) = stub_downstream().await;
     let (_tmp, config) = test_config_full(downstream, 30, true);
