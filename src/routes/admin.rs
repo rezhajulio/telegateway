@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    app::AppState,
     outbox::{OUTBOX_STATUSES, deliver_payload},
+    state::AppState,
     telegram,
 };
 

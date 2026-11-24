@@ -3,7 +3,7 @@
 //! Liveness and readiness probes.
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 
-use crate::app::AppState;
+use crate::state::AppState;
 
 /// Liveness probe: the process is running.
 pub async fn healthz() -> &'static str {

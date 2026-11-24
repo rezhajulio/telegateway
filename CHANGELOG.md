@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-24
+
+### Changed
+
+- Move `AppState` (and `AppState::bot`) from `app` into a new `state` module,
+  so `app` and `routes` no longer import each other. `app::AppState` stays as
+  a re-export of `state::AppState`, so existing library callers are unaffected.
+
 ## [0.1.4] - 2026-11-10
 
 ### Fixed

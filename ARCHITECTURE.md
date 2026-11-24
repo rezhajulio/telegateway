@@ -90,7 +90,8 @@ Response contract with Telegram:
 | Module            | Responsibility                                                        |
 | ----------------- | --------------------------------------------------------------------- |
 | `config`          | TOML loading and validation. Fails fast on bad config.                |
-| `app`             | Router assembly, shared `AppState`, middleware stack.                 |
+| `app`             | Router assembly, per-bot dispatchers, middleware stack.               |
+| `state`           | Shared `AppState` injected into every handler.                        |
 | `routes::health`  | `/healthz` (liveness) and `/readyz` (readiness, checks the outbox).   |
 | `routes::webhook` | The ingress handler: authenticate → adapt → admit → persist → log.    |
 | `routes::admin`   | `/outbox` listing and `/outbox/replay`, bearer-token guarded.          |
