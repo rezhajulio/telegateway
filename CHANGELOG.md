@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Move `AppState` (and `AppState::bot`) from `app` into a new `state` module,
-  so `app` and `routes` no longer import each other. `app::AppState` stays as
-  a re-export of `state::AppState`, so existing library callers are unaffected.
+- **Breaking:** `AppState` (and `AppState::bot`) moved from `app` into a new
+  `state` module, so `app` and `routes` no longer import each other. Library
+  callers must replace `telegateway::app::AppState` with
+  `telegateway::state::AppState`. There is no re-export at the old path.
 
 ## [0.1.4] - 2026-11-10
 

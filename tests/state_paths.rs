@@ -1,14 +1,12 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Compile-level check that `AppState` is reachable at both its new home and
-//! the legacy `app` path, and that both name the same type.
-use telegateway::{app, state};
+//! Compile-level check that `AppState` is public at `telegateway::state` and
+//! satisfies the bounds axum needs to inject it into handlers.
+use telegateway::state::AppState;
 
-fn same_type<T>(_: Option<T>, _: Option<T>) {}
+fn assert_handler_state<T: Clone + Send + Sync + 'static>() {}
 
 #[test]
-fn app_state_paths_name_the_same_type() {
-    let legacy: Option<app::AppState> = None;
-    let current: Option<state::AppState> = None;
-    same_type(legacy, current);
+fn app_state_is_injectable_from_state_module() {
+    assert_handler_state::<AppState>();
 }

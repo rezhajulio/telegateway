@@ -20,11 +20,8 @@ use crate::{
     outbox::{CircuitBreaker, Dispatcher, Store},
     policy::AdmissionPolicy,
     routes,
+    state::AppState,
 };
-
-/// Re-exported so the pre-0.1.5 `app::AppState` path keeps working. The
-/// type lives in [`crate::state`]; routes import it from there.
-pub use crate::state::AppState;
 
 /// Everything `build_router` produces: the router plus the background
 /// workers the caller must spawn.
