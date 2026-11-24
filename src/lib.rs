@@ -13,4 +13,5 @@ pub mod outbox;
 pub mod policy;
 pub mod register;
 pub mod routes;
+pub mod state;
 pub mod telegram;

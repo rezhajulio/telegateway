@@ -1,7 +1,7 @@
 // telegateway — Copyright (C) 2026 Rezha Julio
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Router assembly: builds the axum router, shared state, and per-bot
-//! outbox dispatchers from the config.
+//! Router assembly: builds the axum router, the shared [`AppState`], and
+//! per-bot outbox dispatchers from the config.
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Context;
@@ -16,38 +16,15 @@ use tower::{limit::ConcurrencyLimitLayer, load_shed::LoadShedLayer};
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::{
-    config::{BotConfig, Config},
+    config::Config,
     outbox::{CircuitBreaker, Dispatcher, Store},
     policy::AdmissionPolicy,
     routes,
 };
 
-/// Shared state injected into every handler.
-#[derive(Clone)]
-pub struct AppState {
-    /// Bot configs by id, for routing and forwarding.
-    pub bots: Arc<Vec<BotConfig>>,
-    /// Per-chat rate limiters.
-    pub policy: AdmissionPolicy,
-    /// Outbound HTTP client for downstream delivery.
-    pub http: reqwest::Client,
-    /// The durable outbox.
-    pub store: Store,
-    /// Wake signals for each bot's dispatcher, keyed by bot id.
-    pub notifies: Arc<HashMap<String, Arc<Notify>>>,
-    /// Bearer token for the admin routes; `None` means they are not
-    /// registered.
-    pub admin_token: Option<String>,
-    /// Maximum allowed pending updates before rejecting with 503.
-    pub max_pending: u64,
-}
-
-impl AppState {
-    /// Look up a bot's config by id.
-    pub fn bot(&self, id: &str) -> Option<&BotConfig> {
-        self.bots.iter().find(|b| b.id == id)
-    }
-}
+/// Re-exported so the pre-0.1.5 `app::AppState` path keeps working. The
+/// type lives in [`crate::state`]; routes import it from there.
+pub use crate::state::AppState;
 
 /// Everything `build_router` produces: the router plus the background
 /// workers the caller must spawn.

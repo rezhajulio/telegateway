@@ -10,7 +10,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::{app::AppState, outbox::InsertOutcome, telegram};
+use crate::{outbox::InsertOutcome, state::AppState, telegram};
 
 /// Telegram's header carrying the webhook secret configured via `setWebhook`.
 const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
